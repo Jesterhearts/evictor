@@ -1,5 +1,8 @@
 # evictor
 
+[![Crates.io](https://img.shields.io/crates/v/evictor.svg)](https://crates.io/crates/evictor)
+[![Docs.rs](https://docs.rs/evictor/badge.svg)](https://docs.rs/evictor)
+
 A fixed-capacity least-recently-used (LRU) cache implementation in Rust.
 
 ## Usage
