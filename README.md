@@ -2,16 +2,19 @@
 
 [![Crates.io](https://img.shields.io/crates/v/evictor.svg)](https://crates.io/crates/evictor)
 [![Docs.rs](https://docs.rs/evictor/badge.svg)](https://docs.rs/evictor)
+[![Dependency status](https://deps.rs/repo/github/jesterhearts/evictor/status.svg)](https://deps.rs/repo/github/jesterhearts/evictor)
 
-A fixed-capacity least-recently-used (LRU) cache implementation in Rust.
+A least-recently-used (LRU) cache implementation.
 
 ## Usage
 ### Basic Example
 
 ```rust
+use std::num::NonZeroUsize;
+
 use evictor::Lru;
 
-let mut cache = Lru::<3, i32, String>::new();
+let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
 // Insert entries
 cache.insert(1, "one".to_string());
@@ -33,6 +36,8 @@ assert_eq!(oldest_key, &3);
 
 ### Creating from Iterator
 
+This will set the capacity to the number of items in the iterator.
+
 ```rust
 use evictor::Lru;
 
@@ -42,7 +47,7 @@ let items = vec![
     (3, "three".to_string()),
 ];
 
-let cache: Lru<5, i32, String> = items.into_iter().collect();
+let cache: Lru<i32, String> = items.into_iter().collect();
 ```
 
 ## Features
@@ -53,4 +58,5 @@ let cache: Lru<5, i32, String> = items.into_iter().collect();
 
 ## License
 
-This project is licensed under the either the APACHE or MIT License at your option. See the [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) files for details.
+This project is licensed under the either the APACHE or MIT License at your option. See the
+[LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) files for details.
