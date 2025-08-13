@@ -51,15 +51,6 @@ let cache: Lru<5, i32, String> = items.into_iter().collect();
 
 - `ahash` - Fast hashing using the `ahash` crate (enabled by default)
 
-### Disabling ahash
-
-To use `std::hash::RandomState` instead:
-
-```toml
-[dependencies]
-evictor = { version = "0.1.0", default-features = false }
-```
-
 ## License
 
 This project is licensed under the either the APACHE or MIT License at your option. See the [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) files for details.
