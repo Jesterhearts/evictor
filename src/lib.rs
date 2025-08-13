@@ -132,7 +132,11 @@ impl<const CAPACITY: usize, Key: Hash + Eq, Value> Lru<CAPACITY, Key, Value> {
     /// Gets the value for a key, or inserts it using the provided function.
     /// Returns an immutable reference to existing value (if found) or the newly inserted value.
     /// If the cache is full, the least recently used entry is removed.
-    pub fn get_or_insert_with(&mut self, key: Key, or_insert: impl FnOnce() -> Value) -> &Value {
+    pub fn get_or_insert_with(
+        &mut self,
+        key: Key,
+        or_insert: impl FnOnce(&Key) -> Value,
+    ) -> &Value {
         self.get_or_insert_with_mut(key, or_insert)
     }
 
@@ -142,7 +146,7 @@ impl<const CAPACITY: usize, Key: Hash + Eq, Value> Lru<CAPACITY, Key, Value> {
     pub fn get_or_insert_with_mut(
         &mut self,
         key: Key,
-        or_insert: impl FnOnce() -> Value,
+        or_insert: impl FnOnce(&Key) -> Value,
     ) -> &mut Value {
         if self.age == 0 {
             self.age = u64::MAX;
@@ -155,10 +159,11 @@ impl<const CAPACITY: usize, Key: Hash + Eq, Value> Lru<CAPACITY, Key, Value> {
             indexmap::map::Entry::Occupied(o) => o.index(),
             indexmap::map::Entry::Vacant(v) => {
                 let index = v.index();
-                v.insert(Entry {
+                let e = Entry {
                     age: self.age,
-                    value: or_insert(),
-                });
+                    value: or_insert(v.key()),
+                };
+                v.insert(e);
                 index
             }
         };
@@ -491,14 +496,14 @@ mod tests {
         let mut lru = Lru::<3, i32, String>::default();
         let mut call_count = 0;
 
-        let value = lru.get_or_insert_with(1, || {
+        let value = lru.get_or_insert_with(1, |_| {
             call_count += 1;
             "one".to_string()
         });
         assert_eq!(value, &"one".to_string());
         assert_eq!(call_count, 1);
 
-        let value = lru.get_or_insert_with(1, || {
+        let value = lru.get_or_insert_with(1, |_| {
             call_count += 1;
             "different".to_string()
         });
@@ -510,12 +515,12 @@ mod tests {
     fn test_get_or_insert_with_mut() {
         let mut lru = Lru::<3, i32, String>::default();
 
-        let value = lru.get_or_insert_with_mut(1, || "one".to_string());
+        let value = lru.get_or_insert_with_mut(1, |_| "one".to_string());
         *value = "modified".to_string();
 
         assert_eq!(lru.peek(&1), Some(&"modified".to_string()));
 
-        let value = lru.get_or_insert_with_mut(1, || "different".to_string());
+        let value = lru.get_or_insert_with_mut(1, |_| "different".to_string());
         assert_eq!(value, &"modified".to_string());
     }
 
@@ -719,12 +724,12 @@ mod tests {
         lru.insert(1, "one".to_string());
         lru.insert(2, "two".to_string());
 
-        lru.get_or_insert_with(1, || "new_one".to_string());
+        lru.get_or_insert_with(1, |_| "new_one".to_string());
         assert_eq!(lru.len(), 2);
         assert!(lru.contains_key(&1));
         assert!(lru.contains_key(&2));
 
-        lru.get_or_insert_with(3, || "three".to_string());
+        lru.get_or_insert_with(3, |_| "three".to_string());
         assert_eq!(lru.len(), 2);
         assert!(lru.contains_key(&1));
         assert!(!lru.contains_key(&2));
