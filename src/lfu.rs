@@ -131,6 +131,13 @@ impl Policy for LfuPolicy {
             index = target;
         }
 
+        let mut parent_index = index.saturating_sub(1) / 2;
+        while index > 0 && queue[index].priority() < queue[parent_index].priority() {
+            queue.swap_indices(index, parent_index);
+            index = parent_index;
+            parent_index = index.saturating_sub(1) / 2;
+        }
+
         index
     }
 
@@ -156,6 +163,39 @@ mod tests {
         Entry,
         Lfu,
     };
+
+    fn assert_heap_property<Key, Value>(lfu: &Lfu<Key, Value>) {
+        for i in 0..lfu.queue.len() {
+            let left_idx = i * 2 + 1;
+            let right_idx = i * 2 + 2;
+
+            if left_idx < lfu.queue.len() {
+                let parent_priority = lfu.queue[i].priority;
+                let left_child_priority = lfu.queue[left_idx].priority;
+                assert!(
+                    parent_priority <= left_child_priority,
+                    "Min-heap property violated: parent at index {} has priority {}, left child at index {} has priority {}",
+                    i,
+                    parent_priority,
+                    left_idx,
+                    left_child_priority
+                );
+            }
+
+            if right_idx < lfu.queue.len() {
+                let parent_priority = lfu.queue[i].priority;
+                let right_child_priority = lfu.queue[right_idx].priority;
+                assert!(
+                    parent_priority <= right_child_priority,
+                    "Min-heap property violated: parent at index {} has priority {}, right child at index {} has priority {}",
+                    i,
+                    parent_priority,
+                    right_idx,
+                    right_child_priority
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_assign_update_next_value() {
@@ -300,6 +340,7 @@ mod tests {
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
         assert_eq!(cache.len(), 3);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -317,6 +358,7 @@ mod tests {
         assert!(cache.contains_key(&1));
         assert!(!cache.contains_key(&2));
         assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -333,6 +375,7 @@ mod tests {
 
         let least_frequent_after = cache.tail().map(|(k, _)| *k);
         assert_ne!(least_frequent_before, least_frequent_after);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -375,6 +418,7 @@ mod tests {
         assert_eq!(removed, Some("one".to_string()));
         assert!(!cache.contains_key(&1));
         assert_eq!(cache.len(), 2);
+        assert_heap_property(&cache);
 
         let removed = cache.remove(&1);
         assert_eq!(removed, None);
@@ -390,6 +434,7 @@ mod tests {
 
         let (_key, _value) = cache.pop().unwrap();
         assert_eq!(cache.len(), 2);
+        assert_heap_property(&cache);
 
         let mut empty_cache = Lfu::<i32, String>::new(NonZeroUsize::new(1).unwrap());
         assert!(empty_cache.pop().is_none());
@@ -423,6 +468,7 @@ mod tests {
         assert!(!cache.contains_key(&3));
         assert!(cache.contains_key(&4));
         assert_eq!(cache.len(), 2);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -438,6 +484,7 @@ mod tests {
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -455,6 +502,7 @@ mod tests {
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -469,6 +517,7 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -487,6 +536,8 @@ mod tests {
         let value_ref = cache.get_or_insert_with_mut(2, |_| "two".to_string());
         value_ref.push_str(" new");
         assert_eq!(cache.peek(&2), Some(&"two new".to_string()));
+        dbg!(&cache);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -519,6 +570,7 @@ mod tests {
 
         assert!(lfu_cache.contains_key(&3));
         assert!(lru_cache.contains_key(&3));
+        assert_heap_property(&lfu_cache);
     }
 
     #[test]
@@ -551,6 +603,7 @@ mod tests {
 
         assert!(lfu_cache.contains_key(&3));
         assert!(mru_cache.contains_key(&3));
+        assert_heap_property(&lfu_cache);
     }
 
     #[test]
@@ -594,6 +647,7 @@ mod tests {
 
         let least_frequent = cache.tail().map(|(k, _)| *k);
         assert_eq!(least_frequent, Some(2));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -610,10 +664,11 @@ mod tests {
         cache.insert(3, "three".to_string());
         cache.insert(4, "four".to_string());
 
+        assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
         assert!(cache.contains_key(&4));
-        assert!(!cache.contains_key(&1));
+        assert!(!cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -644,6 +699,7 @@ mod tests {
         assert!(cache.contains_key(&2));
         assert!(!cache.contains_key(&4));
         assert!(cache.contains_key(&5));
+        assert_heap_property(&cache);
     }
 
     #[test]

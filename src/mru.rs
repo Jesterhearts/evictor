@@ -137,7 +137,41 @@ mod tests {
     use crate::{
         Cache,
         Entry,
+        Mru,
     };
+
+    fn assert_heap_property<Key, Value>(mru: &Mru<Key, Value>) {
+        for i in 0..mru.queue.len() {
+            let left_idx = i * 2 + 1;
+            let right_idx = i * 2 + 2;
+
+            if left_idx < mru.queue.len() {
+                let parent_priority = mru.queue[i].priority;
+                let left_child_priority = mru.queue[left_idx].priority;
+                assert!(
+                    parent_priority >= left_child_priority,
+                    "Heap property violated: parent at index {} has priority {}, left child at index {} has priority {}",
+                    i,
+                    parent_priority,
+                    left_idx,
+                    left_child_priority
+                );
+            }
+
+            if right_idx < mru.queue.len() {
+                let parent_priority = mru.queue[i].priority;
+                let right_child_priority = mru.queue[right_idx].priority;
+                assert!(
+                    parent_priority >= right_child_priority,
+                    "Heap property violated: parent at index {} has priority {}, right child at index {} has priority {}",
+                    i,
+                    parent_priority,
+                    right_idx,
+                    right_child_priority
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_assign_update_next_value() {
@@ -283,6 +317,7 @@ mod tests {
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
         assert_eq!(cache.len(), 3);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -300,6 +335,7 @@ mod tests {
         assert!(!cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -317,6 +353,7 @@ mod tests {
 
         let oldest_after = cache.tail().map(|(k, _)| *k);
         assert_ne!(oldest_before, oldest_after);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -347,6 +384,7 @@ mod tests {
         let value = cache.get_or_insert_with(1, |_| "different".to_string());
         assert_eq!(value, "one");
         assert_eq!(cache.len(), 1);
+        // No heap assertion for single-item cache
     }
 
     #[test]
@@ -364,6 +402,7 @@ mod tests {
         assert_eq!(cache.len(), 2);
         let youngest = cache.tail().map(|(k, _)| *k);
         assert_eq!(youngest, Some(3));
+        assert_heap_property(&cache);
 
         let removed = cache.remove(&1);
         assert_eq!(removed, None);
@@ -380,6 +419,7 @@ mod tests {
 
         let (_key, _value) = cache.pop().unwrap();
         assert_eq!(cache.len(), 2);
+        assert_heap_property(&cache);
 
         let mut empty_cache = MruCache::new(NonZeroUsize::new(1).unwrap());
         assert!(empty_cache.pop().is_none());
@@ -415,6 +455,7 @@ mod tests {
         assert!(!cache.contains_key(&3));
         assert!(cache.contains_key(&4));
         assert_eq!(cache.len(), 2);
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -431,6 +472,7 @@ mod tests {
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -450,6 +492,7 @@ mod tests {
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -480,6 +523,7 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -499,6 +543,7 @@ mod tests {
         let value_ref = cache.get_or_insert_with_mut(2, |_| "two".to_string());
         value_ref.push_str(" new");
         assert_eq!(cache.peek(&2), Some(&"two new".to_string()));
+        assert_heap_property(&cache);
     }
 
     #[test]
@@ -530,6 +575,7 @@ mod tests {
 
         assert!(mru_cache.contains_key(&3));
         assert!(lru_cache.contains_key(&3));
+        assert_heap_property(&mru_cache);
     }
 
     #[test]
@@ -571,6 +617,7 @@ mod tests {
         cache.get(&3);
         let youngest = cache.tail().map(|(k, _)| *k);
         assert_eq!(youngest, Some(3));
+        assert_heap_property(&cache);
     }
 
     #[test]
