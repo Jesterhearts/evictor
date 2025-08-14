@@ -1087,4 +1087,24 @@ mod tests {
         assert_eq!(cache.len(), 3);
         assert_heap_property(&cache);
     }
+
+    #[test]
+    fn test_lfu_heap_corruption_and_heapify() {
+        let mut lfu = Lfu::<i32, i32>::new(NonZeroUsize::new(7).unwrap());
+
+        for i in 0..7 {
+            lfu.insert(i, i * 10);
+        }
+
+        {
+            let queue = &mut lfu.queue;
+            queue[1].priority = 50;
+            queue[2].priority = 5;
+            queue[4].priority = 100;
+        }
+
+        lfu.heapify();
+
+        assert_heap_property(&lfu);
+    }
 }

@@ -1444,4 +1444,24 @@ mod tests {
             prev_age = entry.priority;
         }
     }
+
+    #[test]
+    fn test_lru_heap_corruption_and_heapify() {
+        let mut lru = Lru::<i32, i32>::new(NonZeroUsize::new(7).unwrap());
+
+        for i in 0..7 {
+            lru.insert(i, i * 10);
+        }
+
+        {
+            let queue = &mut lru.queue;
+            queue[1].priority = 9999;
+            queue[3].priority = 1;
+            queue[5].priority = 8888;
+        }
+
+        lru.heapify();
+
+        assert_heap_property(&lru);
+    }
 }

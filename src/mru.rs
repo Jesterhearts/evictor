@@ -1131,4 +1131,24 @@ mod tests {
         assert!(cache.len() <= 4);
         assert_heap_property(&cache);
     }
+
+    #[test]
+    fn test_mru_heap_corruption_and_heapify() {
+        let mut mru = Mru::<i32, i32>::new(NonZeroUsize::new(7).unwrap());
+
+        for i in 0..7 {
+            mru.insert(i, i * 10);
+        }
+
+        {
+            let queue = &mut mru.queue;
+            queue[0].priority = 5;
+            queue[2].priority = 999;
+            queue[4].priority = 1;
+        }
+
+        mru.heapify();
+
+        assert_heap_property(&mru);
+    }
 }
