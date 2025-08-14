@@ -964,4 +964,127 @@ mod tests {
         let mut next_priority = 0u64;
         LfuPolicy::re_index(&mut queue, &mut next_priority, 0);
     }
+
+    #[test]
+    fn test_lfu_cache_equal_frequencies() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        cache.get(&1);
+        cache.get(&2);
+        cache.get(&3);
+
+        cache.insert(4, "four");
+
+        assert_eq!(cache.len(), 3);
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_cache_mixed_frequency_patterns() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        cache.get(&1);
+        for _ in 0..2 {
+            cache.get(&2);
+        }
+        for _ in 0..3 {
+            cache.get(&3);
+        }
+
+        cache.insert(6, "value_6".to_string());
+        cache.insert(7, "value_7".to_string());
+
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&1));
+        assert_eq!(cache.len(), 5);
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_cache_get_or_insert_with_frequency_update() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+
+        let value = cache.get_or_insert_with(1, |_| "new_one");
+        assert_eq!(*value, "one");
+
+        let value = cache.get_or_insert_with(3, |_| "three");
+        assert_eq!(*value, "three");
+
+        cache.insert(4, "four");
+
+        assert!(cache.contains_key(&1));
+        assert!(!cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_cache_priority_overflow_edge_case() {
+        let mut entry = Entry {
+            priority: u64::MAX,
+            value: "test",
+        };
+        let mut cache_next = 0u64;
+
+        LfuPolicy::assign_update_next_value(&mut cache_next, &mut entry);
+
+        assert_eq!(entry.priority, u64::MAX);
+        assert_eq!(cache_next, 0);
+    }
+
+    #[test]
+    fn test_lfu_cache_from_iter_with_duplicates() {
+        let items = vec![
+            (1, "one"),
+            (2, "two"),
+            (3, "three"),
+            (1, "one_updated"),
+            (4, "four"),
+            (2, "two_updated"),
+        ];
+
+        let cache: Lfu<i32, &str> = items.into_iter().collect();
+
+        assert_eq!(cache.len(), 4);
+        assert_eq!(cache.peek(&1), Some(&"one_updated"));
+        assert_eq!(cache.peek(&2), Some(&"two_updated"));
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_cache_insert_mut_frequency_behavior() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        let val1 = cache.insert_mut(1, String::from("one"));
+        val1.push_str("_modified");
+
+        cache.insert(2, String::from("two"));
+        cache.insert(3, String::from("three"));
+
+        let val1_again = cache.get_mut(&1).unwrap();
+        val1_again.push_str("_again");
+
+        cache.insert(4, String::from("four"));
+
+        // Key 1 should be kept due to higher frequency from get_mut
+        assert!(cache.contains_key(&1));
+        assert_eq!(cache.peek(&1), Some(&String::from("one_modified_again")));
+        assert_eq!(cache.len(), 3);
+        assert_heap_property(&cache);
+    }
 }

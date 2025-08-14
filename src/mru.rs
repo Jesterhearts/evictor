@@ -1043,4 +1043,92 @@ mod tests {
         assert_eq!(empty_queue.len(), 0);
         assert_eq!(next_priority_empty, u64::MIN);
     }
+
+    #[test]
+    fn test_mru_cache_insert_same_key_multiple_times() {
+        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        cache.insert(1, "first");
+        cache.insert(2, "second");
+
+        cache.insert(1, "updated_first");
+        assert_eq!(cache.peek(&1), Some(&"updated_first"));
+        assert_eq!(cache.len(), 2);
+
+        cache.insert(3, "third");
+
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_mru_cache_alternating_access_pattern() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        for _ in 0..10 {
+            cache.get(&1);
+            cache.get(&2);
+        }
+
+        cache.insert(4, "four");
+
+        assert!(!cache.contains_key(&2));
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_mru_cache_get_or_insert_with_eviction() {
+        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+
+        cache.get(&1);
+
+        let value = cache.get_or_insert_with(3, |_| "three");
+        assert_eq!(*value, "three");
+        assert_eq!(cache.len(), 2);
+
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_mru_cache_interleaved_operations() {
+        let mut cache = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        assert_eq!(cache.get(&1), Some(&10));
+        cache.insert(3, 30);
+
+        if let Some(val) = cache.get_mut(&2) {
+            *val = 200;
+        }
+
+        cache.insert(4, 40);
+        cache.insert(5, 50);
+
+        assert_eq!(cache.len(), 4);
+        assert_heap_property(&cache);
+
+        cache.retain(|&k, _| k % 2 == 1);
+
+        let items: Vec<_> = (0..10).map(|i| (i + 10, (i + 10) * 10)).collect();
+        cache.extend(items);
+
+        assert!(cache.len() <= 4);
+        assert_heap_property(&cache);
+    }
 }
