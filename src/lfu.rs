@@ -472,6 +472,243 @@ mod tests {
     }
 
     #[test]
+    fn test_lfu_retain_empty_cache() {
+        let mut cache = Lfu::<i32, String>::new(NonZeroUsize::new(5).unwrap());
+
+        cache.retain(|_, _| true);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        cache.retain(|_, _| false);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_lfu_retain_all_elements() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        cache.retain(|_, _| true);
+
+        assert_eq!(cache.len(), 5);
+        for i in 1..=5 {
+            assert!(cache.contains_key(&i));
+        }
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_retain_none() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        cache.retain(|_, _| false);
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        for i in 1..=5 {
+            assert!(!cache.contains_key(&i));
+        }
+    }
+
+    #[test]
+    fn test_lfu_retain_with_frequency_changes() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+        cache.insert(4, "four".to_string());
+        cache.insert(5, "five".to_string());
+
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&2);
+        cache.get(&2);
+        cache.get(&3);
+
+        cache.retain(|&k, _| k == 1 || k == 2);
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(!cache.contains_key(&3));
+        assert!(!cache.contains_key(&4));
+        assert!(!cache.contains_key(&5));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_retain_modify_values() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+        cache.insert(4, 40);
+        cache.insert(5, 50);
+
+        cache.retain(|&k, v| {
+            if k % 2 == 0 {
+                *v *= 2;
+                true
+            } else {
+                false
+            }
+        });
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(!cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert!(!cache.contains_key(&5));
+
+        assert_eq!(cache.peek(&2), Some(&40));
+        assert_eq!(cache.peek(&4), Some(&80));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_retain_single_element() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+        cache.insert(42, "answer".to_string());
+
+        cache.retain(|&k, _| k == 42);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&42));
+
+        cache.retain(|&k, _| k != 42);
+        assert!(cache.is_empty());
+        assert!(!cache.contains_key(&42));
+    }
+
+    #[test]
+    fn test_lfu_retain_heap_property_after_removal() {
+        let mut cache = Lfu::new(NonZeroUsize::new(10).unwrap());
+
+        for i in 1..=10 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        for _ in 0..5 {
+            cache.get(&1);
+        }
+        for _ in 0..3 {
+            cache.get(&3);
+        }
+        for _ in 0..7 {
+            cache.get(&7);
+        }
+        for _ in 0..2 {
+            cache.get(&2);
+            cache.get(&9);
+        }
+
+        cache.retain(|&k, _| k > 5);
+
+        assert_eq!(cache.len(), 5);
+        for i in 1..=5 {
+            assert!(!cache.contains_key(&i));
+        }
+        for i in 6..=10 {
+            assert!(cache.contains_key(&i));
+        }
+        assert_heap_property(&cache);
+
+        cache.insert(11, "eleven".to_string());
+        cache.get(&7);
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_retain_with_duplicates_and_reinserts() {
+        let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, i);
+        }
+
+        cache.get(&1);
+        cache.get(&3);
+        cache.get(&5);
+
+        cache.retain(|&k, _| k % 2 == 1);
+        assert_eq!(cache.len(), 3);
+
+        cache.insert(2, 200);
+        cache.insert(4, 400);
+        cache.insert(6, 600);
+
+        assert_eq!(cache.len(), 5);
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert!(cache.contains_key(&5));
+        assert!(cache.contains_key(&6));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_retain_stress_test() {
+        let mut cache = Lfu::new(NonZeroUsize::new(100).unwrap());
+
+        for i in 0..100 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        for i in 0..50 {
+            cache.get(&(i % 25));
+        }
+
+        cache.retain(|&k, v| {
+            let should_retain = k % 3 == 0 || k % 7 == 0;
+            if should_retain {
+                *v = format!("retained_{}", k);
+            }
+            should_retain
+        });
+
+        assert_heap_property(&cache);
+
+        for i in 0..100 {
+            if i % 3 == 0 || i % 7 == 0 {
+                if cache.contains_key(&i) {
+                    assert_eq!(cache.peek(&i), Some(&format!("retained_{}", i)));
+                }
+            } else {
+                assert!(!cache.contains_key(&i));
+            }
+        }
+    }
+
+    #[test]
+    fn test_lfu_retain_capacity_one() {
+        let mut cache = Lfu::new(NonZeroUsize::new(1).unwrap());
+        cache.insert(1, "one".to_string());
+
+        cache.retain(|_, _| true);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&1));
+
+        cache.retain(|_, _| false);
+        assert!(cache.is_empty());
+
+        cache.insert(2, "two".to_string());
+        cache.retain(|&k, _| k > 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&2));
+    }
+
+    #[test]
     fn test_lfu_cache_extend() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -499,6 +736,23 @@ mod tests {
 
         assert_eq!(cache.len(), 3);
         assert_eq!(cache.capacity(), 3);
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lfu_cache_from_iter_overlapping() {
+        let items = vec![
+            (1, "one".to_string()),
+            (2, "two".to_string()),
+            (3, "three".to_string()),
+            (3, "three_new".to_string()),
+        ];
+
+        let cache: Lfu<i32, String> = items.into_iter().collect();
+
         assert!(cache.contains_key(&1));
         assert!(cache.contains_key(&2));
         assert!(cache.contains_key(&3));

@@ -1153,6 +1153,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// Retains only the entries for which the predicate returns true.
     pub fn retain(&mut self, mut f: impl FnMut(&Key, &mut Value) -> bool) {
         self.queue.retain(|key, entry| f(key, &mut entry.value));
+        self.heapify();
     }
 
     /// Extends the cache with key-value pairs from an iterator.
@@ -1179,6 +1180,16 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
         PolicyType::heap_bubble(0, &mut self.queue);
         result
     }
+
+    fn heapify(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+
+        for i in (0..self.queue.len() / 2).rev() {
+            PolicyType::heap_bubble(i, &mut self.queue);
+        }
+    }
 }
 
 impl<Key: Hash + Eq, Value, PolicyType: Policy> std::iter::FromIterator<(Key, Value)>
@@ -1188,13 +1199,31 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> std::iter::FromIterator<(Key, Va
     where
         I: IntoIterator<Item = (Key, Value)>,
     {
-        let items = iter.into_iter().collect::<Vec<_>>();
-        let mut lru = Cache::new(NonZeroUsize::new(items.len().max(1)).unwrap());
+        let mut queue: IndexMap<Key, Entry<Value>, ahash::RandomState> =
+            IndexMap::with_hasher(RandomState::default());
+        let mut priority = PolicyType::start_value();
 
-        for (item, value) in items {
-            lru.insert(item, value);
+        for (key, value) in iter {
+            match queue.entry(key) {
+                indexmap::map::Entry::Occupied(mut o) => {
+                    o.get_mut().value = value;
+                    PolicyType::assign_update_next_value(&mut priority, o.get_mut());
+                }
+                indexmap::map::Entry::Vacant(v) => {
+                    let entry = v.insert(Entry { priority, value });
+                    PolicyType::assign_update_next_value(&mut priority, entry);
+                }
+            }
         }
 
+        let capacity = NonZeroUsize::new(queue.len().max(1)).unwrap();
+        let mut lru = Self {
+            queue,
+            capacity,
+            next_priority: priority,
+            _policy: std::marker::PhantomData,
+        };
+        lru.heapify();
         lru
     }
 }

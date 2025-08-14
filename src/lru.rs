@@ -148,7 +148,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        Cache,
         Entry,
         Lru,
     };
@@ -265,8 +264,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_basic_operations() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
@@ -284,8 +282,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_eviction_policy() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -301,8 +298,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_get_updates_priority() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -318,8 +314,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_peek_does_not_update_priority() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -334,8 +329,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_get_or_insert_with() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
 
         let value = cache.get_or_insert_with(1, |_| "one".to_string());
         assert_eq!(value, "one");
@@ -348,8 +342,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_remove() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -365,8 +358,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_pop() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -375,14 +367,13 @@ mod tests {
         let (_key, _value) = cache.pop().unwrap();
         assert_eq!(cache.len(), 2);
 
-        let mut empty_cache = LruCache::new(NonZeroUsize::new(1).unwrap());
+        let mut empty_cache = Lru::<i32, String>::new(NonZeroUsize::new(1).unwrap());
         assert!(empty_cache.pop().is_none());
     }
 
     #[test]
     fn test_lru_cache_clear() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -394,8 +385,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_retain() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(5).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -412,9 +402,299 @@ mod tests {
     }
 
     #[test]
+    fn test_lru_retain_empty_cache() {
+        let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(5).unwrap());
+
+        cache.retain(|_, _| true);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        cache.retain(|_, _| false);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_all_elements() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        cache.retain(|_, _| true);
+
+        assert_eq!(cache.len(), 5);
+        for i in 1..=5 {
+            assert!(cache.contains_key(&i));
+        }
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_none() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        cache.retain(|_, _| false);
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        for i in 1..=5 {
+            assert!(!cache.contains_key(&i));
+        }
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_with_recency_patterns() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+        cache.insert(4, "four".to_string());
+        cache.insert(5, "five".to_string());
+
+        cache.get(&1);
+        cache.get(&3);
+        cache.get(&5);
+
+        cache.retain(|&k, _| k == 1 || k == 3 || k == 5);
+
+        assert_eq!(cache.len(), 3);
+        assert!(cache.contains_key(&1));
+        assert!(!cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert!(!cache.contains_key(&4));
+        assert!(cache.contains_key(&5));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_modify_values() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+        cache.insert(4, 40);
+        cache.insert(5, 50);
+
+        cache.retain(|&k, v| {
+            if k % 2 == 0 {
+                *v *= 2;
+                true
+            } else {
+                false
+            }
+        });
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(!cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert!(!cache.contains_key(&5));
+
+        assert_eq!(cache.peek(&2), Some(&40));
+        assert_eq!(cache.peek(&4), Some(&80));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_single_element() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+        cache.insert(42, "answer".to_string());
+
+        cache.retain(|&k, _| k == 42);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&42));
+        assert_heap_property(&cache);
+
+        cache.retain(|&k, _| k != 42);
+        assert!(cache.is_empty());
+        assert!(!cache.contains_key(&42));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_heap_property_after_removal() {
+        let mut cache = Lru::new(NonZeroUsize::new(10).unwrap());
+
+        for i in 1..=10 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        for i in &[1, 3, 5, 7, 9] {
+            cache.get(i);
+        }
+
+        cache.retain(|&k, _| k > 5);
+
+        assert_eq!(cache.len(), 5);
+        for i in 1..=5 {
+            assert!(!cache.contains_key(&i));
+        }
+        for i in 6..=10 {
+            assert!(cache.contains_key(&i));
+        }
+        assert_heap_property(&cache);
+
+        cache.insert(11, "eleven".to_string());
+        cache.get(&7);
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_with_duplicates_and_reinserts() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, i);
+        }
+
+        cache.get(&1);
+        cache.get(&3);
+        cache.get(&5);
+
+        cache.retain(|&k, _| k % 2 == 1);
+        assert_eq!(cache.len(), 3);
+        assert_heap_property(&cache);
+
+        cache.insert(2, 200);
+        cache.insert(4, 400);
+        cache.insert(6, 600);
+
+        assert_eq!(cache.len(), 5);
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert!(cache.contains_key(&4));
+        assert!(cache.contains_key(&5));
+        assert!(cache.contains_key(&6));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_stress_test() {
+        let mut cache = Lru::new(NonZeroUsize::new(100).unwrap());
+
+        for i in 0..100 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        for i in 0..50 {
+            cache.get(&(i % 25));
+        }
+
+        cache.retain(|&k, v| {
+            let should_retain = k % 3 == 0 || k % 7 == 0;
+            if should_retain {
+                *v = format!("retained_{}", k);
+            }
+            should_retain
+        });
+
+        assert_heap_property(&cache);
+
+        for i in 0..100 {
+            if i % 3 == 0 || i % 7 == 0 {
+                if cache.contains_key(&i) {
+                    assert_eq!(cache.peek(&i), Some(&format!("retained_{}", i)));
+                }
+            } else {
+                assert!(!cache.contains_key(&i));
+            }
+        }
+    }
+
+    #[test]
+    fn test_lru_retain_capacity_one() {
+        let mut cache = Lru::new(NonZeroUsize::new(1).unwrap());
+        cache.insert(1, "one".to_string());
+
+        cache.retain(|_, _| true);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&1));
+        assert_heap_property(&cache);
+
+        cache.retain(|_, _| false);
+        assert!(cache.is_empty());
+        assert_heap_property(&cache);
+
+        cache.insert(2, "two".to_string());
+        cache.retain(|&k, _| k > 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&2));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_and_lru_behavior() {
+        let mut cache = Lru::new(NonZeroUsize::new(4).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+        cache.insert(4, "four".to_string());
+
+        cache.get(&2);
+        cache.get(&1);
+        cache.get(&4);
+
+        cache.retain(|&k, _| k == 3 || k == 2);
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert!(!cache.contains_key(&4));
+        assert_heap_property(&cache);
+
+        cache.insert(5, "five".to_string());
+        cache.insert(6, "six".to_string());
+        cache.insert(7, "seven".to_string());
+
+        assert_eq!(cache.len(), 4);
+        assert!(cache.contains_key(&2) || cache.contains_key(&3));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
+    fn test_lru_retain_preserves_access_order() {
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
+
+        for i in 1..=5 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        cache.get(&3);
+        cache.get(&1);
+        cache.get(&4);
+
+        let oldest_before = cache.tail().map(|(k, _)| *k);
+
+        cache.retain(|_, _| true);
+
+        let oldest_after = cache.tail().map(|(k, _)| *k);
+
+        assert_eq!(oldest_before, oldest_after);
+        assert_heap_property(&cache);
+
+        cache.insert(6, "six".to_string());
+        cache.insert(7, "seven".to_string());
+
+        assert!(cache.len() <= 5);
+        assert_heap_property(&cache);
+    }
+
+    #[test]
     fn test_lru_cache_extend() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(5).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
 
         cache.insert(1, "one".to_string());
 
@@ -429,15 +709,13 @@ mod tests {
 
     #[test]
     fn test_lru_cache_from_iterator() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-
         let items = vec![
             (1, "one".to_string()),
             (2, "two".to_string()),
             (3, "three".to_string()),
         ];
 
-        let cache: LruCache = items.into_iter().collect();
+        let cache: Lru<i32, String> = items.into_iter().collect();
 
         assert_eq!(cache.len(), 3);
         assert_eq!(cache.capacity(), 3);
@@ -447,9 +725,27 @@ mod tests {
     }
 
     #[test]
+    fn test_lru_cache_from_iterator_overlapping() {
+        let items = vec![
+            (1, "one".to_string()),
+            (2, "two".to_string()),
+            (3, "three".to_string()),
+            (1, "updated_one".to_string()),
+        ];
+
+        let cache: Lru<i32, String> = items.into_iter().collect();
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.capacity(), 3);
+        assert!(cache.contains_key(&1));
+        assert!(cache.contains_key(&2));
+        assert!(cache.contains_key(&3));
+        assert_heap_property(&cache);
+    }
+
+    #[test]
     fn test_lru_cache_priority_wraparound() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
 
         for i in 0..1000000 {
             cache.insert(i, format!("value{}", i));
@@ -463,8 +759,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_shrink_to_fit() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(10).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(10).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -478,8 +773,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache_mutable_operations() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
         let value_ref = cache.insert_mut(1, "one".to_string());
         value_ref.push_str(" modified");
@@ -504,8 +798,7 @@ mod tests {
 
     #[test]
     fn test_edge_case_capacity_one() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(1).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(1).unwrap());
 
         cache.insert(1, "one".to_string());
         assert_eq!(cache.len(), 1);
@@ -518,8 +811,7 @@ mod tests {
 
     #[test]
     fn test_priority_ordering_consistency() {
-        type LruCache = Cache<i32, String, LruPolicy>;
-        let mut cache = LruCache::new(NonZeroUsize::new(5).unwrap());
+        let mut cache = Lru::new(NonZeroUsize::new(5).unwrap());
 
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
