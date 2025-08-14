@@ -3,7 +3,7 @@ name        = "evictor"
 version     = "0.3.0"
 edition     = "2024"
 license     = "MIT OR Apache-2.0"
-description = "A fixed-capacity least-recently-used (LRU) cache"
+description = "A least-recently-used (LRU) cache"
 keywords    = [ "lru", "cache", "eviction", "heap", "data-structures" ]
 categories  = [ "caching", "data-structures", "memory-management" ]
 repository  = "https://github.com/jesterhearts/evictor"
@@ -14,5 +14,5 @@ default = [ "ahash" ]
 ahash   = [ "dep:ahash" ]
 
 [dependencies]
-ahash    = { version = "0.8.12", optional = true }
+ahash    = { version = "0.8.12", default-features = false, features = [ "std", "compile-time-rng" ], optional = true }
 indexmap = "2.10.0"
