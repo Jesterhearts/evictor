@@ -258,7 +258,7 @@ pub trait Policy: Sealed {
 /// cache, the least recently used entry is automatically evicted. All
 /// operations that access values (get, insert, get_or_insert_with) update the
 /// entry's position in the LRU order. Operations that only read without
-/// accessing (peek, contains_key, oldest) do not affect LRU ordering.
+/// accessing (peek, contains_key, tail) do not affect LRU ordering.
 ///
 /// # Time Complexity
 /// - Insert/Get/Remove: O(log n) average, O(n) worst case
@@ -302,7 +302,7 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// cache, the most recently used entry is automatically evicted. All
 /// operations that access values (get, insert, get_or_insert_with) update the
 /// entry's position in the MRU order. Operations that only read without
-/// accessing (peek, contains_key, oldest) do not affect MRU ordering.
+/// accessing (peek, contains_key, tail) do not affect MRU ordering.
 ///
 /// This is the opposite of LRU behavior - instead of keeping frequently used
 /// items, MRU evicts the items that were just accessed, making it useful for
@@ -311,7 +311,7 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// # Time Complexity
 /// - Insert/Get/Remove: O(log n) average, O(n) worst case
 /// - Peek/Contains: O(1) average, O(n) worst case
-/// - Pop (oldest): O(log n)
+/// - Pop (youngest): O(log n)
 /// - Clear: O(1)
 ///
 /// # Space Complexity
@@ -351,7 +351,7 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// cache, the least frequently used entry is automatically evicted. All
 /// operations that access values (get, insert, get_or_insert_with) increment
 /// the entry's frequency counter. Operations that only read without accessing
-/// (peek, contains_key, oldest) do not affect frequency tracking.
+/// (peek, contains_key, tail) do not affect frequency tracking.
 ///
 /// Unlike LRU which tracks recency of access, LFU tracks frequency of access,
 /// making it useful for scenarios where you want to keep items that are
@@ -360,7 +360,7 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// # Time Complexity
 /// - Insert/Get/Remove: O(log n) average, O(n) worst case
 /// - Peek/Contains: O(1) average, O(n) worst case
-/// - Pop (oldest): O(log n)
+/// - Pop (least-frequently-used): O(log n)
 /// - Clear: O(1)
 ///
 /// # Space Complexity
