@@ -536,7 +536,6 @@ mod tests {
         let value_ref = cache.get_or_insert_with_mut(2, |_| "two".to_string());
         value_ref.push_str(" new");
         assert_eq!(cache.peek(&2), Some(&"two new".to_string()));
-        dbg!(&cache);
         assert_heap_property(&cache);
     }
 
