@@ -1189,7 +1189,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> std::iter::FromIterator<(Key, Va
         I: IntoIterator<Item = (Key, Value)>,
     {
         let items = iter.into_iter().collect::<Vec<_>>();
-        let mut lru = Cache::new(NonZeroUsize::new(items.len()).unwrap());
+        let mut lru = Cache::new(NonZeroUsize::new(items.len().max(1)).unwrap());
 
         for (item, value) in items {
             lru.insert(item, value);
