@@ -8,6 +8,7 @@ use crate::{
     RandomState,
 };
 
+#[derive(Debug)]
 pub struct LruPolicy;
 
 impl Policy for LruPolicy {

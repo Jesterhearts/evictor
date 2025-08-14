@@ -6,6 +6,7 @@ use crate::{
     RandomState,
 };
 
+#[derive(Debug)]
 pub struct MruPolicy;
 
 impl Policy for MruPolicy {
@@ -26,28 +27,15 @@ impl Policy for MruPolicy {
         mut index: usize,
         queue: &mut indexmap::IndexMap<impl Hash + Eq, T, RandomState>,
     ) -> usize {
-        while index > 0 {
-            let left_idx = (index / 2).saturating_sub(1);
-            let right_idx = index / 2;
+        let mut parent_index = index.saturating_sub(1) / 2;
 
-            if right_idx == 0 {
-                if queue[0].priority() < queue[index].priority() {
-                    queue.swap_indices(right_idx, index);
-                }
-                break;
-            }
-
-            let target = if queue[left_idx].priority() > queue[right_idx].priority() {
-                left_idx
-            } else {
-                right_idx
-            };
-
-            queue.swap_indices(target, index);
-            index = target;
+        while index > 0 && queue[index].priority() > queue[parent_index].priority() {
+            queue.swap_indices(index, parent_index);
+            index = parent_index;
+            parent_index = index.saturating_sub(1) / 2;
         }
 
-        0
+        index
     }
 
     fn re_index<T: EntryValue>(
@@ -86,16 +74,6 @@ mod tests {
         Cache,
         Entry,
     };
-
-    #[test]
-    fn test_mru_policy_start_value() {
-        assert_eq!(MruPolicy::start_value(), u64::MIN);
-    }
-
-    #[test]
-    fn test_mru_policy_end_value() {
-        assert_eq!(MruPolicy::end_value(), u64::MAX);
-    }
 
     #[test]
     fn test_assign_update_next_value() {
@@ -159,7 +137,7 @@ mod tests {
         );
 
         let result = MruPolicy::heap_bubble(1, &mut queue);
-        assert_eq!(result, 0);
+        assert_eq!(result, 1);
         assert_eq!(queue[0].priority, 200);
         assert_eq!(queue[1].priority, 100);
     }

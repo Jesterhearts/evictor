@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+mod lfu;
 mod lru;
 mod mru;
 
@@ -9,6 +10,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
+pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
 
@@ -22,12 +24,14 @@ type RandomState = ahash::RandomState;
 mod private {
     use crate::{
         Entry,
+        lfu::LfuPolicy,
         lru::LruPolicy,
         mru::MruPolicy,
     };
     pub trait Sealed {}
     impl Sealed for LruPolicy {}
     impl Sealed for MruPolicy {}
+    impl Sealed for LfuPolicy {}
 
     impl<T> Sealed for Entry<T> {}
 }
@@ -164,6 +168,8 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// assert!(cache.contains_key(&4));
 /// ```
 pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
+
+pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 
 /// A generic cache implementation with configurable eviction policies.
 ///
