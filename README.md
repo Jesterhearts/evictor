@@ -4,7 +4,8 @@
 [![Docs.rs](https://docs.rs/evictor/badge.svg)](https://docs.rs/evictor)
 [![Dependency status](https://deps.rs/repo/github/jesterhearts/evictor/status.svg)](https://deps.rs/repo/github/jesterhearts/evictor)
 
-A least-recently-used (LRU) cache implementation.
+Provides several cache implementation defined by eviction policies, such as LRU (Least Recently
+Used) and MRU (Most Recently Used).
 
 ## Usage
 ### Basic Example
@@ -30,7 +31,7 @@ assert!(!cache.contains_key(&2)); // 2 was evicted
 
 // Peek doesn't affect LRU order
 cache.peek(&3);
-let (oldest_key, _) = cache.oldest().unwrap();
+let (oldest_key, _) = cache.tail().unwrap();
 assert_eq!(oldest_key, &3);
 ```
 
