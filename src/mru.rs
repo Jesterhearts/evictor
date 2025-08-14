@@ -6,6 +6,72 @@ use crate::{
     RandomState,
 };
 
+/// Policy implementation for Most Recently Used (MRU) cache eviction.
+///
+/// This policy tracks when entries were last accessed and evicts the entry
+/// that was accessed most recently when the cache reaches capacity. This is
+/// the opposite of LRU behavior and is useful in scenarios where you want to
+/// prioritize older, less-accessed items over recently accessed ones.
+///
+/// # Implementation Details
+///
+/// ## Priority System
+/// - **Priority Values**: Uses ascending u64 values starting from `u64::MIN`
+/// - **Recent Access**: Higher priority values = more recently accessed
+/// - **Eviction Target**: Entry with highest priority (most recent access time)
+/// - **Priority Assignment**: Each access increments the global priority
+///   counter
+///
+/// ## Heap Structure
+/// The underlying heap maintains the invariant that parent nodes have
+/// priorities >= their children, ensuring the most recently used item
+/// (highest priority) is always at index 0 for efficient eviction.
+///
+/// ## Priority Counter Management
+/// - **Start Value**: `u64::MIN` (oldest possible priority)
+/// - **End Value**: `u64::MAX` (newest possible priority)
+/// - **Overflow Handling**: When counter reaches `u64::MAX`, it wraps to
+///   `u64::MIN` and the entire heap is re-indexed to maintain ordering
+///
+/// # Usage
+///
+/// This policy is typically used through the [`Mru`] type alias rather than
+/// directly:
+///
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::{
+///     Cache,
+///     MruPolicy,
+/// };
+///
+/// // Direct usage (not recommended)
+/// let mut cache: Cache<i32, String, MruPolicy> = Cache::new(NonZeroUsize::new(3).unwrap());
+///
+/// // Preferred usage via type alias
+/// use evictor::Mru;
+/// let mut cache: Mru<i32, String> = Mru::new(NonZeroUsize::new(2).unwrap());
+///
+/// cache.insert(1, "first".to_string());
+/// cache.insert(2, "second".to_string());
+///
+/// // Access an item, making it most recently used
+/// cache.get(&1);
+///
+/// // Insert when full - evicts the most recently used (key 1)
+/// cache.insert(3, "third".to_string());
+/// assert!(!cache.contains_key(&1)); // 1 was evicted (most recently used)
+/// assert!(cache.contains_key(&2)); // 2 was not recently accessed, so kept
+/// ```
+///
+/// # Performance Characteristics
+///
+/// - **Access Update**: O(log n) - requires heap bubble operation
+/// - **Eviction**: O(log n) - removes root and re-heapifies
+/// - **Priority Overflow**: O(n) - occurs very rarely (every 2^64 operations)
+///
+/// [`Mru`]: crate::Mru
 #[derive(Debug)]
 pub struct MruPolicy;
 
@@ -47,18 +113,16 @@ impl Policy for MruPolicy {
             *next_priority = Self::start_value();
         }
 
-        Self::assign_update_next_value(next_priority, &mut queue[index]);
-
-        if index == 0 {
+        if index >= queue.len() {
             return;
         }
 
-        let left_index = (index / 2).saturating_sub(1);
-        let right_index = index / 2;
+        Self::assign_update_next_value(next_priority, &mut queue[index]);
 
-        if left_index != right_index {
-            Self::re_index(queue, next_priority, left_index);
-        }
+        let left_index = index * 2 + 1;
+        let right_index = index * 2 + 2;
+
+        Self::re_index(queue, next_priority, left_index);
         Self::re_index(queue, next_priority, right_index);
     }
 }
@@ -507,5 +571,123 @@ mod tests {
         cache.get(&3);
         let youngest = cache.tail().map(|(k, _)| *k);
         assert_eq!(youngest, Some(3));
+    }
+
+    #[test]
+    fn test_mru_re_index_functionality() {
+        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
+
+        queue.insert(
+            1,
+            Entry {
+                priority: 100,
+                value: "one",
+            },
+        );
+        queue.insert(
+            2,
+            Entry {
+                priority: 200,
+                value: "two",
+            },
+        );
+        queue.insert(
+            3,
+            Entry {
+                priority: 150,
+                value: "three",
+            },
+        );
+        queue.insert(
+            4,
+            Entry {
+                priority: 75,
+                value: "four",
+            },
+        );
+
+        let mut next_priority = u64::MAX;
+
+        MruPolicy::re_index(&mut queue, &mut next_priority, 0);
+
+        assert!(queue[0].priority < u64::MAX);
+        assert!(queue[1].priority < u64::MAX);
+        assert!(queue[2].priority < u64::MAX);
+        assert!(queue[3].priority < u64::MAX);
+
+        assert!(next_priority > u64::MIN);
+        assert!(next_priority < u64::MAX);
+
+        let priorities: std::collections::HashSet<u64> =
+            queue.values().map(|entry| entry.priority).collect();
+        assert_eq!(
+            priorities.len(),
+            4,
+            "All priorities should be unique after re-indexing"
+        );
+    }
+
+    #[test]
+    fn test_mru_re_index_maintains_relative_order() {
+        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
+
+        queue.insert(
+            1,
+            Entry {
+                priority: 10,
+                value: "oldest",
+            },
+        );
+        queue.insert(
+            2,
+            Entry {
+                priority: 20,
+                value: "middle",
+            },
+        );
+        queue.insert(
+            3,
+            Entry {
+                priority: 30,
+                value: "newest",
+            },
+        );
+
+        let mut next_priority = u64::MAX;
+
+        MruPolicy::re_index(&mut queue, &mut next_priority, 0);
+
+        assert!(queue.get(&1).unwrap().priority < queue.get(&2).unwrap().priority);
+        assert!(queue.get(&2).unwrap().priority < queue.get(&3).unwrap().priority);
+
+        for (_, entry) in queue.iter() {
+            assert!(entry.priority < u64::MAX);
+        }
+    }
+
+    #[test]
+    fn test_mru_re_index_edge_cases() {
+        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
+        queue.insert(
+            1,
+            Entry {
+                priority: 100,
+                value: "only",
+            },
+        );
+
+        let mut next_priority = u64::MAX;
+        MruPolicy::re_index(&mut queue, &mut next_priority, 0);
+
+        assert_eq!(queue.len(), 1);
+        assert!(queue[0].priority < u64::MAX);
+        assert!(next_priority > u64::MIN);
+
+        let mut empty_queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
+        let mut next_priority_empty = u64::MAX;
+        MruPolicy::re_index(&mut empty_queue, &mut next_priority_empty, 0);
+
+        assert_eq!(empty_queue.len(), 0);
+        assert_eq!(next_priority_empty, u64::MIN);
     }
 }

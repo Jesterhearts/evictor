@@ -8,6 +8,61 @@ use crate::{
     RandomState,
 };
 
+/// Policy implementation for Least Recently Used (LRU) cache eviction.
+///
+/// This policy tracks when entries were last accessed and evicts the entry
+/// that was accessed furthest in the past when the cache reaches capacity.
+/// It implements a priority system where higher priority values indicate
+/// more recent access.
+///
+/// # Implementation Details
+///
+/// ## Priority System
+/// - **Priority Values**: Uses descending u64 values starting from `u64::MAX`
+/// - **Recent Access**: Higher priority values = more recently accessed
+/// - **Eviction Target**: Entry with lowest priority (oldest access time)
+/// - **Priority Assignment**: Each access decrements the global priority
+///   counter
+///
+/// ## Heap Structure
+/// The underlying heap maintains the invariant that parent nodes have
+/// priorities >= their children, ensuring the least recently used item
+/// (lowest priority) is always at index 0 for efficient eviction.
+///
+/// ## Priority Counter Management
+/// - **Start Value**: `u64::MAX` (newest possible priority)
+/// - **End Value**: `u64::MIN` (oldest possible priority)
+/// - **Overflow Handling**: When counter reaches `u64::MIN`, it wraps to
+///   `u64::MAX` and the entire heap is re-indexed to maintain ordering
+///
+/// # Usage
+///
+/// This policy is typically used through the [`Lru`] type alias rather than
+/// directly:
+///
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::{
+///     Cache,
+///     LruPolicy,
+/// };
+///
+/// // Direct usage (not recommended)
+/// let mut cache: Cache<i32, String, LruPolicy> = Cache::new(NonZeroUsize::new(3).unwrap());
+///
+/// // Preferred usage via type alias
+/// use evictor::Lru;
+/// let mut cache: Lru<i32, String> = Lru::new(NonZeroUsize::new(3).unwrap());
+/// ```
+///
+/// # Performance Characteristics
+///
+/// - **Access Update**: O(log n) - requires heap bubble operation
+/// - **Eviction**: O(log n) - removes root and re-heapifies
+/// - **Priority Overflow**: O(n) - occurs very rarely (every 2^64 operations)
+///
+/// [`Lru`]: crate::Lru
 #[derive(Debug)]
 pub struct LruPolicy;
 

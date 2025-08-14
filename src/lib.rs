@@ -57,18 +57,194 @@ impl<Value> EntryValue for Entry<Value> {
     }
 }
 
+/// Trait defining cache eviction policies.
+///
+/// This trait provides the core interface for implementing different cache
+/// eviction strategies. Each policy determines how entries are prioritized and
+/// which entries should be evicted when the cache reaches capacity.
+///
+/// # Implementation Overview
+///
+/// The policy controls cache behavior through a priority-based system where
+/// each entry has a numeric priority value. The cache maintains these entries
+/// in a heap structure, with the entry at index 0 always being the next
+/// candidate for eviction.
+///
+/// ## Priority Systems
+///
+/// Different policies use different priority assignment strategies:
+///
+/// - **LRU (Least Recently Used)**: Uses descending priorities (u64::MAX →
+///   u64::MIN) where lower values indicate more recent access
+/// - **MRU (Most Recently Used)**: Uses ascending priorities (u64::MIN →
+///   u64::MAX) where higher values indicate more recent access
+/// - **LFU (Least Frequently Used)**: Uses frequency counters starting at 0,
+///   incremented on each access
+///
+/// ## Heap Invariants
+///
+/// The implementation must maintain heap properties:
+/// - **LRU**: Max-heap where parent priority ≥ child priority
+/// - **MRU**: Max-heap where parent priority ≥ child priority
+/// - **LFU**: Min-heap where parent priority ≤ child priority
+///
+/// # Required Methods
+///
+/// Implementers must provide:
+/// 1. **Priority bounds**: `start_value()` and `end_value()`
+/// 2. **Priority assignment**: `assign_update_next_value()`
+/// 3. **Heap maintenance**: `heap_bubble()`
+/// 4. **Overflow handling**: `re_index()`
+///
+/// # Sealed Trait
+///
+/// This trait is sealed and cannot be implemented outside of this crate. The
+/// available implementations are [`LruPolicy`], [`MruPolicy`], and
+/// [`LfuPolicy`].
+///
+/// [`LruPolicy`]: crate::LruPolicy
+/// [`MruPolicy`]: crate::MruPolicy
+/// [`LfuPolicy`]: crate::LfuPolicy
 pub trait Policy: Sealed {
+    /// Returns the initial priority value for new cache entries.
+    ///
+    /// This value is used when the cache is first created and represents
+    /// the starting point of the priority range. Different policies use
+    /// different starting values based on their priority assignment strategy.
+    ///
+    /// # Policy-Specific Values
+    ///
+    /// - **LRU**: `u64::MAX`
+    /// - **MRU**: `u64::MIN`
+    /// - **LFU**: `0` (frequency counter starts at zero)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use evictor::{
+    ///     LfuPolicy,
+    ///     LruPolicy,
+    ///     MruPolicy,
+    ///     Policy,
+    /// };
+    ///
+    /// assert_eq!(LruPolicy::start_value(), u64::MAX);
+    /// assert_eq!(MruPolicy::start_value(), u64::MIN);
+    /// assert_eq!(LfuPolicy::start_value(), 0);
+    /// ```
     fn start_value() -> u64;
 
+    /// Returns the sentinel value indicating priority range exhaustion.
+    ///
+    /// When the cache's next priority value reaches this sentinel, the cache
+    /// must perform re-indexing to reset the priority range. This prevents
+    /// priority overflow and maintains proper cache ordering.
+    ///
+    /// # Policy-Specific Values
+    ///
+    /// - **LRU**: `u64::MIN` (when countdown reaches minimum)
+    /// - **MRU**: `u64::MAX` (when count-up reaches maximum)
+    /// - **LFU**: `1` (sentinel value, re-indexing not supported)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use evictor::{
+    ///     LfuPolicy,
+    ///     LruPolicy,
+    ///     MruPolicy,
+    ///     Policy,
+    /// };
+    ///
+    /// assert_eq!(LruPolicy::end_value(), u64::MIN);
+    /// assert_eq!(MruPolicy::end_value(), u64::MAX);
+    /// assert_eq!(LfuPolicy::end_value(), 1);
+    /// ```
     fn end_value() -> u64;
 
+    /// Updates an entry's priority and advances the global priority counter.
+    ///
+    /// This method is called whenever an entry is accessed or inserted. It
+    /// must:
+    /// 1. Assign the current priority to the entry
+    ///
+    /// It **may** also modify the global priority counter (`cache_next`) if
+    /// required for tracking invariants.
+    ///
+    /// The exact behavior depends on the policy's priority strategy.
+    ///
+    /// # Parameters
+    ///
+    /// * `cache_next` - Mutable reference to the cache's global priority
+    ///   counter
+    /// * `entry` - Mutable reference to the cache entry being updated
+    ///
+    /// # Policy Behavior
+    ///
+    /// - **LRU**: Assigns current counter value, then decrements counter
+    /// - **MRU**: Assigns current counter value, then increments counter
+    /// - **LFU**: Increments entry's frequency, ignores global counter
     fn assign_update_next_value(cache_next: &mut u64, entry: &mut impl EntryValue);
 
+    /// Maintains heap ordering after priority changes.
+    ///
+    /// This method restores the heap invariant after an entry's priority has
+    /// been modified. It may need to bubble the entry up or down in the
+    /// heap depending on the new priority value and the policy's heap type
+    /// (min-heap vs max-heap).
+    ///
+    /// # Parameters
+    ///
+    /// * `index` - The index of the entry that may be out of place
+    /// * `queue` - Mutable reference to the cache's internal storage
+    ///
+    /// # Returns
+    ///
+    /// The final index where the entry settled after heap reordering.
+    ///
+    /// # Implementation Requirements
+    ///
+    /// - Must maintain the appropriate heap property for the policy
+    /// - Should be efficient (typically O(log n) complexity)
+    /// - Must handle edge cases (empty queue, single element, etc.)
+    ///
+    /// # Heap Properties by Policy
+    ///
+    /// - **LRU**: Max-heap (parent ≥ children) - recent items bubble down
+    /// - **MRU**: Max-heap (parent ≥ children) - recent items bubble up
+    /// - **LFU**: Min-heap (parent ≤ children) - frequent items bubble down
     fn heap_bubble<T: EntryValue>(
         index: usize,
         queue: &mut IndexMap<impl Hash + Eq, T, RandomState>,
     ) -> usize;
 
+    /// Reassigns priorities when the global counter reaches overflow.
+    ///
+    /// This method is called when `cache_next` equals `end_value()`, indicating
+    /// that the priority range has been exhausted. The implementation must
+    /// reassign priorities to all entries to prevent overflow while maintaining
+    /// relative ordering.
+    ///
+    /// # Parameters
+    ///
+    /// * `queue` - Mutable reference to the cache's internal storage
+    /// * `next_priority` - Mutable reference to reset the global priority
+    ///   counter
+    /// * `index` - Starting index for recursive re-indexing (typically 0)
+    ///
+    /// # Implementation Requirements
+    ///
+    /// - Must preserve relative priority ordering
+    /// - Should reset `next_priority` to a valid starting value
+    /// - Must handle empty queues gracefully
+    /// - May use recursive tree traversal for efficiency
+    ///
+    /// # Policy Support
+    ///
+    /// - **LRU**: Supported - resets priorities maintaining recency order
+    /// - **MRU**: Supported - resets priorities maintaining recency order
+    /// - **LFU**: Not supported - panics because frequencies can't be reset.
+    ///   This should be unreachable during normal usage.
     fn re_index<T: EntryValue>(
         queue: &mut IndexMap<impl Hash + Eq, T, RandomState>,
         next_priority: &mut u64,
@@ -169,16 +345,143 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// ```
 pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 
+/// A least-frequently-used (LFU) cache.
+///
+/// The cache maintains at most `capacity` entries. When inserting into a full
+/// cache, the least frequently used entry is automatically evicted. All
+/// operations that access values (get, insert, get_or_insert_with) increment
+/// the entry's frequency counter. Operations that only read without accessing
+/// (peek, contains_key, oldest) do not affect frequency tracking.
+///
+/// Unlike LRU which tracks recency of access, LFU tracks frequency of access,
+/// making it useful for scenarios where you want to keep items that are
+/// accessed repeatedly, regardless of when they were last accessed.
+///
+/// # Time Complexity
+/// - Insert/Get/Remove: O(log n) average, O(n) worst case
+/// - Peek/Contains: O(1) average, O(n) worst case
+/// - Pop (oldest): O(log n)
+/// - Clear: O(1)
+///
+/// # Space Complexity
+/// - O(`capacity`) memory usage
+/// - Pre-allocates space for `capacity` entries
+///
+/// # Frequency Tracking
+///
+/// Each entry maintains a frequency counter that starts at 0 and increments
+/// on every access. When eviction is needed, the entry with the lowest
+/// frequency is removed. If multiple entries have the same frequency, the
+/// implementation will choose one based on internal heap ordering.
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::Lfu;
+///
+/// let mut cache = Lfu::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+///
+/// cache.insert(1, "one".to_string());
+/// cache.insert(2, "two".to_string());
+/// cache.insert(3, "three".to_string());
+///
+/// assert_eq!(cache.len(), 3);
+///
+/// // Access key 1 multiple times to increase its frequency
+/// cache.get(&1);
+/// cache.get(&1);
+/// cache.get(&1);
+///
+/// // Access key 2 once
+/// cache.get(&2);
+///
+/// // Key 3 has frequency 0 (never accessed after insertion)
+/// // Insert new item - this will evict the least frequently used (key 3)
+/// cache.insert(4, "four".to_string());
+/// assert!(!cache.contains_key(&3)); // Evicted (frequency 0)
+/// assert!(cache.contains_key(&1)); // Kept (frequency 3)
+/// assert!(cache.contains_key(&2)); // Kept (frequency 1)
+/// assert!(cache.contains_key(&4)); // Newly inserted
+/// ```
+///
+/// ## Comparison with LRU
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::{
+///     Lfu,
+///     Lru,
+/// };
+///
+/// let mut lfu = Lfu::<i32, String>::new(NonZeroUsize::new(2).unwrap());
+/// let mut lru = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
+///
+/// // Same initial setup
+/// lfu.insert(1, "one".to_string());
+/// lfu.insert(2, "two".to_string());
+/// lru.insert(1, "one".to_string());
+/// lru.insert(2, "two".to_string());
+///
+/// // Access key 1 multiple times
+/// lfu.get(&1);
+/// lfu.get(&1);
+/// lru.get(&1); // Only matters that it was accessed recently
+///
+/// // Insert new item causing eviction
+/// lfu.insert(3, "three".to_string());
+/// lru.insert(3, "three".to_string());
+///
+/// // LFU keeps frequently accessed item (key 1), evicts key 2
+/// assert!(lfu.contains_key(&1));
+/// assert!(!lfu.contains_key(&2));
+///
+/// // LRU keeps recently accessed item (key 1), evicts key 2
+/// assert!(lru.contains_key(&1));
+/// assert!(!lru.contains_key(&2));
+///
+/// // But with different access patterns, results differ:
+/// let mut lfu2 = Lfu::<i32, String>::new(NonZeroUsize::new(2).unwrap());
+/// let mut lru2 = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
+///
+/// lfu2.insert(1, "one".to_string());
+/// lfu2.insert(2, "two".to_string());
+/// lru2.insert(1, "one".to_string());
+/// lru2.insert(2, "two".to_string());
+///
+/// // Access key 1 frequently, then key 2 once (recently)
+/// for _ in 0..5 {
+///     lfu2.get(&1);
+/// }
+/// for _ in 0..5 {
+///     lru2.get(&1);
+/// }
+/// lfu2.get(&2);
+/// lru2.get(&2);
+///
+/// lfu2.insert(3, "three".to_string());
+/// lru2.insert(3, "three".to_string());
+///
+/// // LFU keeps the frequently used key 1, evicts recently used key 2
+/// assert!(lfu2.contains_key(&1));
+/// assert!(!lfu2.contains_key(&2));
+///
+/// // LRU keeps the recently used key 2, evicts key 1
+/// assert!(!lru2.contains_key(&1));
+/// assert!(lru2.contains_key(&2));
+/// ```
 pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 
 /// A generic cache implementation with configurable eviction policies.
 ///
-/// `Cache` is the underlying generic structure that powers both LRU and MRU
+/// `Cache` is the underlying generic structure that powers LRU, MRU, and LFU
 /// caches. The eviction behavior is determined by the `PolicyType` parameter,
 /// which must implement the [`Policy`] trait.
 ///
-/// For most use cases, you should use the type aliases [`Lru`] or [`Mru`]
-/// instead of using `Cache` directly.
+/// For most use cases, you should use the type aliases [`Lru`], [`Mru`], or
+/// [`Lfu`] instead of using `Cache` directly.
 ///
 /// # Type Parameters
 ///
@@ -190,11 +493,6 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 ///
 /// # Internal Structure
 ///
-/// The cache uses an [`IndexMap`] as the underlying storage, which provides:
-/// - O(1) average access time for key-value operations
-/// - Efficient reordering of entries based on access patterns
-/// - Memory-efficient storage with capacity management
-///
 /// The cache maintains a priority system where each entry has a numeric
 /// priority that determines its position in the eviction order. The policy
 /// determines how priorities are assigned and updated.
@@ -202,8 +500,9 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 /// # Heap Invariant
 ///
 /// The cache maintains a heap-like structure where:
-/// - For LRU: Higher priority values indicate more recent access
-/// - For MRU: Lower priority values indicate more recent access
+/// - For LRU: Lower priority values indicate more recent access
+/// - For MRU: Higher priority values indicate more recent access
+/// - For LFU: Higher priority values indicate more frequent access
 /// - The entry at index 0 is always the next candidate for eviction
 ///
 /// # Memory Management
@@ -211,11 +510,6 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 /// - Pre-allocates space for `capacity` entries to minimize reallocations
 /// - Automatically evicts entries when capacity is exceeded
 /// - Supports shrinking to reduce memory usage when needed
-///
-/// # Thread Safety
-///
-/// This cache is not thread-safe. For concurrent access, wrap it in appropriate
-/// synchronization primitives like `Mutex` or `RwLock`.
 ///
 /// # Examples
 ///
@@ -357,6 +651,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// depends on the policy:
     /// - LRU: Returns the least recently used entry
     /// - MRU: Returns the most recently used entry
+    /// - LFU: Returns the least frequently used entry
     ///
     /// # Returns
     ///
@@ -499,7 +794,6 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
         or_insert: impl FnOnce(&Key) -> Value,
     ) -> &mut Value {
         if self.next_priority == PolicyType::end_value() {
-            self.next_priority = PolicyType::start_value();
             PolicyType::re_index(&mut self.queue, &mut self.next_priority, 0);
         }
 
@@ -727,6 +1021,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// order. The specific entry removed depends on the policy:
     /// - LRU: Removes the least recently used entry
     /// - MRU: Removes the most recently used entry
+    /// - LFU: Removes the least frequently used entry
     ///
     /// # Returns
     ///

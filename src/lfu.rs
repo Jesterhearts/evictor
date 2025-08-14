@@ -8,6 +8,80 @@ use crate::{
     RandomState,
 };
 
+/// Policy implementation for Least Frequently Used (LFU) cache eviction.
+///
+/// This policy tracks how frequently entries have been accessed and evicts
+/// the entry that has been accessed the fewest times when the cache reaches
+/// capacity. Unlike LRU/MRU which focus on recency, LFU focuses on frequency
+/// of access, making it ideal for workloads with strong frequency-based
+/// locality patterns.
+///
+/// # Implementation Details
+///
+/// ## Frequency Tracking System
+/// - **Priority Values**: Each entry maintains a frequency counter starting at
+///   0
+/// - **Frequency Updates**: Counter increments on every access (get, insert,
+///   etc.)
+/// - **Eviction Target**: Entry with lowest frequency count
+/// - **Tie Breaking**: When frequencies are equal, heap ordering determines
+///   eviction
+///
+/// ## Heap Structure
+/// The underlying heap maintains a min-heap invariant where parent nodes have
+/// frequencies <= their children, ensuring the least frequently used item
+/// (lowest frequency) is always at index 0 for efficient eviction.
+///
+/// ## Priority Counter Management
+/// - **Start Value**: `0` (no global counter used - each entry tracks its own
+///   frequency)
+/// - **End Value**: `1` (used as a sentinel, re_index is not supported)
+/// - **Overflow Handling**: Uses `saturating_add` to prevent frequency overflow
+/// - **No Re-indexing**: LFU doesn't support global re-indexing since
+///   frequencies are entry-specific rather than based on a global timestamp
+///
+/// # Usage
+///
+/// This policy is typically used through the [`Lfu`] type alias rather than
+/// directly:
+///
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::{
+///     Cache,
+///     LfuPolicy,
+/// };
+///
+/// // Direct usage (not recommended)
+/// let mut cache: Cache<i32, String, LfuPolicy> = Cache::new(NonZeroUsize::new(3).unwrap());
+///
+/// // Preferred usage via type alias
+/// use evictor::Lfu;
+/// let mut cache: Lfu<i32, String> = Lfu::new(NonZeroUsize::new(3).unwrap());
+///
+/// cache.insert(1, "first".to_string()); // frequency: 0
+/// cache.insert(2, "second".to_string()); // frequency: 0
+///
+/// // Build up different frequency counts
+/// cache.get(&1); // frequency: 1
+/// cache.get(&1); // frequency: 2
+/// cache.get(&2); // frequency: 1
+///
+/// // Insert when full - evicts the least frequently used
+/// cache.insert(3, "third".to_string());
+/// // Key 1 has frequency 2, key 2 has frequency 1, key 3 has frequency 0
+/// // One of the entries with lowest frequency would be evicted
+/// ```
+///
+/// # Performance Characteristics
+///
+/// - **Access Update**: O(log n) - requires heap bubble operation
+/// - **Eviction**: O(log n) - removes root and re-heapifies
+/// - **Frequency Overflow**: Handled via saturation (very rare, requires 2^64
+///   accesses)
+///
+/// [`Lfu`]: crate::Lfu
 #[derive(Debug)]
 pub struct LfuPolicy;
 impl Policy for LfuPolicy {
