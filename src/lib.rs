@@ -893,7 +893,50 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         }
     }
 
-    /// TODO
+    /// Retains only the entries for which the predicate returns `true`.
+    ///
+    /// This method removes all entries from the cache for which the provided
+    /// closure returns `false`. The predicate is called with a reference to
+    /// each key and a mutable reference to each value, allowing for both
+    /// filtering based on key/value content and in-place modification of
+    /// retained values.
+    ///
+    /// The operation preserves the relative order of retained entries according
+    /// to their original insertion order, and the policy's eviction order is
+    /// reconstructed to maintain consistency.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - A closure that takes `(&Key, &mut Value)` and returns `true` for
+    ///   entries that should be kept, `false` for entries that should be
+    ///   removed
+    ///
+    /// # Performance
+    ///
+    /// The cache's internal state is completely rebuilt, so this operation
+    /// should be used sparingly for large caches.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(5).unwrap());
+    /// cache.insert(1, "apple".to_string());
+    /// cache.insert(2, "banana".to_string());
+    /// cache.insert(3, "cherry".to_string());
+    /// cache.insert(4, "date".to_string());
+    ///
+    /// // Keep only entries where the key is even
+    /// cache.retain(|&key, _value| key % 2 == 0);
+    /// assert_eq!(cache.len(), 2);
+    /// assert!(cache.contains_key(&2));
+    /// assert!(cache.contains_key(&4));
+    /// assert!(!cache.contains_key(&1));
+    /// assert!(!cache.contains_key(&3));
+    /// ```
     pub fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut(&Key, &mut Value) -> bool,
