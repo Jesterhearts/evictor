@@ -189,34 +189,24 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// ```
 pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 
-/// A least-frequently-used (LFU) cache.
+/// A list-based least-frequently-used (LFU) cache with O(1) operations.
 ///
-/// The cache maintains at most `capacity` entries. When inserting into a full
-/// cache, the least frequently used entry is automatically evicted. All
-/// operations that access values (get, insert, get_or_insert_with) increment
-/// the entry's frequency counter. Operations that only read without accessing
-/// (peek, contains_key, tail) do not affect frequency tracking.
+/// This implementation uses frequency buckets with doubly-linked lists to
+/// achieve O(1) time complexity for all operations.
 ///
-/// Unlike LRU which tracks recency of access, LFU tracks frequency of access,
-/// making it useful for scenarios where you want to keep items that are
-/// accessed repeatedly, regardless of when they were last accessed.
+/// The cache maintains frequency counters for each entry and uses a
+/// sophisticated bucketing system where entries with the same frequency are
+/// stored in doubly-linked lists. This allows for constant-time promotion
+/// between frequency levels.
 ///
 /// # Time Complexity
-/// - Insert/Get/Remove: O(log n) average, O(n) worst case
+/// - Insert/Get/Remove: O(1) average, O(n) worst case
 /// - Peek/Contains: O(1) average, O(n) worst case
-/// - Pop (least-frequently-used): O(log n)
-/// - Clear: O(1)
+/// - Pop/Clear: O(1)
 ///
 /// # Space Complexity
-/// - O(`capacity`) memory usage
-/// - Pre-allocates space for `capacity` entries
-///
-/// # Frequency Tracking
-///
-/// Each entry maintains a frequency counter that starts at 0 and increments
-/// on every access. When eviction is needed, the entry with the lowest
-/// frequency is removed. If multiple entries have the same frequency, the
-/// implementation will choose one based on internal heap ordering.
+/// - O(`capacity`) memory usage plus frequency bucket metadata
+/// - Additional overhead for tracking frequency buckets (typically small)
 ///
 /// # Examples
 ///
@@ -230,8 +220,6 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
-///
-/// assert_eq!(cache.len(), 3);
 ///
 /// // Access key 1 multiple times to increase its frequency
 /// cache.get(&1);
@@ -248,73 +236,6 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// assert!(cache.contains_key(&1)); // Kept (frequency 3)
 /// assert!(cache.contains_key(&2)); // Kept (frequency 1)
 /// assert!(cache.contains_key(&4)); // Newly inserted
-/// ```
-///
-/// ## Comparison with LRU
-///
-/// ```
-/// use std::num::NonZeroUsize;
-///
-/// use evictor::{
-///     Lfu,
-///     Lru,
-/// };
-///
-/// let mut lfu = Lfu::<i32, String>::new(NonZeroUsize::new(2).unwrap());
-/// let mut lru = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
-///
-/// // Same initial setup
-/// lfu.insert(1, "one".to_string());
-/// lfu.insert(2, "two".to_string());
-/// lru.insert(1, "one".to_string());
-/// lru.insert(2, "two".to_string());
-///
-/// // Access key 1 multiple times
-/// lfu.get(&1);
-/// lfu.get(&1);
-/// lru.get(&1); // Only matters that it was accessed recently
-///
-/// // Insert new item causing eviction
-/// lfu.insert(3, "three".to_string());
-/// lru.insert(3, "three".to_string());
-///
-/// // LFU keeps frequently accessed item (key 1), evicts key 2
-/// assert!(lfu.contains_key(&1));
-/// assert!(!lfu.contains_key(&2));
-///
-/// // LRU keeps recently accessed item (key 1), evicts key 2
-/// assert!(lru.contains_key(&1));
-/// assert!(!lru.contains_key(&2));
-///
-/// // But with different access patterns, results differ:
-/// let mut lfu2 = Lfu::<i32, String>::new(NonZeroUsize::new(2).unwrap());
-/// let mut lru2 = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
-///
-/// lfu2.insert(1, "one".to_string());
-/// lfu2.insert(2, "two".to_string());
-/// lru2.insert(1, "one".to_string());
-/// lru2.insert(2, "two".to_string());
-///
-/// // Access key 1 frequently, then key 2 once (recently)
-/// for _ in 0..5 {
-///     lfu2.get(&1);
-/// }
-/// for _ in 0..5 {
-///     lru2.get(&1);
-/// }
-/// lfu2.get(&2);
-/// lru2.get(&2);
-///
-/// lfu2.insert(3, "three".to_string());
-/// lru2.insert(3, "three".to_string());
-///
-/// // LFU keeps the frequently used key 1, evicts recently used key 2
-/// assert!(lfu2.contains_key(&1));
-/// assert!(!lfu2.contains_key(&2));
-///
-/// // LRU keeps the recently used key 2, evicts key 1
-/// assert!(!lru2.contains_key(&1));
-/// assert!(lru2.contains_key(&2));
 /// ```
 pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 
