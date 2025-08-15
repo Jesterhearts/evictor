@@ -1,158 +1,200 @@
+//! Most Recently Used (MRU) cache implementation.
+//!
+//! This module provides the MRU eviction policy, which removes the most
+//! recently accessed entry when the cache reaches capacity.
+
 use std::hash::Hash;
 
 use crate::{
     EntryValue,
+    Metadata,
     Policy,
     RandomState,
+    private,
 };
 
-/// Policy implementation for Most Recently Used (MRU) cache eviction.
-///
-/// This policy tracks when entries were last accessed and evicts the entry
-/// that was accessed most recently when the cache reaches capacity. This is
-/// the opposite of LRU behavior and is useful in scenarios where you want to
-/// prioritize older, less-accessed items over recently accessed ones.
-///
-/// # Implementation Details
-///
-/// ## Priority System
-/// - **Priority Values**: Uses ascending u64 values starting from `u64::MIN`
-/// - **Recent Access**: Higher priority values = more recently accessed
-/// - **Eviction Target**: Entry with highest priority (most recent access time)
-/// - **Priority Assignment**: Each access increments the global priority
-///   counter
-///
-/// ## Heap Structure
-/// The underlying heap maintains the invariant that parent nodes have
-/// priorities >= their children, ensuring the most recently used item
-/// (highest priority) is always at index 0 for efficient eviction.
-///
-/// ## Priority Counter Management
-/// - **Start Value**: `u64::MIN` (oldest possible priority)
-/// - **End Value**: `u64::MAX` (newest possible priority)
-/// - **Overflow Handling**: When counter reaches `u64::MAX`, it wraps to
-///   `u64::MIN` and the entire heap is re-indexed to maintain ordering
-///
-/// # Usage
-///
-/// This policy is typically used through the [`Mru`] type alias rather than
-/// directly:
-///
-/// ```rust
-/// use std::num::NonZeroUsize;
-///
-/// use evictor::{
-///     Cache,
-///     MruPolicy,
-/// };
-///
-/// // Direct usage (not recommended)
-/// let mut cache: Cache<i32, String, MruPolicy> = Cache::new(NonZeroUsize::new(3).unwrap());
-///
-/// // Preferred usage via type alias
-/// use evictor::Mru;
-/// let mut cache: Mru<i32, String> = Mru::new(NonZeroUsize::new(2).unwrap());
-///
-/// cache.insert(1, "first".to_string());
-/// cache.insert(2, "second".to_string());
-///
-/// // Access an item, making it most recently used
-/// cache.get(&1);
-///
-/// // Insert when full - evicts the most recently used (key 1)
-/// cache.insert(3, "third".to_string());
-/// assert!(!cache.contains_key(&1)); // 1 was evicted (most recently used)
-/// assert!(cache.contains_key(&2)); // 2 was not recently accessed, so kept
-/// ```
-///
-/// # Performance Characteristics
-///
-/// - **Access Update**: O(log n) - requires heap bubble operation
-/// - **Eviction**: O(log n) - removes root and re-heapifies
-/// - **Priority Overflow**: O(n) - occurs very rarely (every 2^64 operations)
-///
-/// [`Mru`]: crate::Mru
-#[derive(Debug)]
+/// MRU cache eviction policy implementation.
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
 pub struct MruPolicy;
 
-impl Policy for MruPolicy {
-    fn start_value() -> u64 {
-        u64::MIN
+impl private::Sealed for MruPolicy {}
+
+/// Metadata for MRU policy tracking head, tail, and aging counter.
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+#[derive(Default)]
+pub struct MruMetadata {
+    pub head: usize,
+    pub tail: usize,
+}
+
+impl private::Sealed for MruMetadata {}
+
+impl Metadata for MruMetadata {
+    fn tail_index(&self) -> usize {
+        self.tail
+    }
+}
+
+/// MRU cache entry containing value and linked list pointers.
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct MruEntry<V> {
+    value: V,
+    next: Option<usize>,
+    prev: Option<usize>,
+}
+
+impl<T> private::Sealed for MruEntry<T> {}
+
+impl<T> EntryValue<T> for MruEntry<T> {
+    fn new(value: T) -> Self {
+        Self {
+            value,
+            next: None,
+            prev: None,
+        }
     }
 
-    fn end_value() -> u64 {
-        u64::MAX
+    fn prepare_for_reinsert(&mut self) {
+        self.next = None;
+        self.prev = None;
     }
 
-    fn assign_update_next_value(cache_next: &mut u64, entry: &mut impl EntryValue) {
-        *entry.priority_mut() = *cache_next;
-        *cache_next = cache_next.wrapping_add(1);
+    fn into_value(self) -> T {
+        self.value
     }
 
-    fn heap_bubble<T: EntryValue>(
-        mut index: usize,
-        queue: &mut indexmap::IndexMap<impl Hash + Eq, T, RandomState>,
+    fn value(&self) -> &T {
+        &self.value
+    }
+
+    fn value_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T> Policy<T> for MruPolicy {
+    type EntryType = MruEntry<T>;
+    type MetadataType = MruMetadata;
+
+    fn touch_entry(
+        index: usize,
+        metadata: &mut Self::MetadataType,
+        queue: &mut indexmap::IndexMap<impl Hash + Eq, Self::EntryType, RandomState>,
     ) -> usize {
-        let mut parent_index = index.saturating_sub(1) / 2;
-
-        while index > 0 && queue[index].priority() > queue[parent_index].priority() {
-            queue.swap_indices(index, parent_index);
-            index = parent_index;
-            parent_index = index.saturating_sub(1) / 2;
+        if index >= queue.len() {
+            return index;
         }
 
-        loop {
-            let left_index = index * 2 + 1;
-            let right_index = index * 2 + 2;
+        // Move the accessed entry to the tail of the queue
+        let old_tail = metadata.tail;
+        if old_tail == index {
+            return index;
+        }
 
-            if left_index >= queue.len() {
-                break;
-            }
+        metadata.tail = index;
+        let old_prev = queue[index].prev;
+        let old_next = queue[index].next;
+        queue[index].prev = None;
+        queue[index].next = Some(old_tail);
 
-            if right_index >= queue.len() {
-                if queue[left_index].priority() > queue[index].priority() {
-                    queue.swap_indices(index, left_index);
-                    index = left_index;
-                }
-                break;
-            }
+        if metadata.head == index {
+            metadata.head = old_prev.unwrap_or_default();
+        }
 
-            let target = if queue[left_index].priority() > queue[right_index].priority() {
-                left_index
-            } else {
-                right_index
-            };
+        queue[old_tail].prev = Some(index);
 
-            if queue[target].priority() <= queue[index].priority() {
-                break;
-            }
-            queue.swap_indices(index, target);
-            index = target;
+        if let Some(prev) = old_prev {
+            queue[prev].next = old_next;
+        }
+
+        if let Some(next) = old_next {
+            queue[next].prev = old_prev;
         }
 
         index
     }
 
-    fn re_index<T: EntryValue>(
-        queue: &mut indexmap::IndexMap<impl Hash + Eq, T, RandomState>,
-        next_priority: &mut u64,
+    fn iter_removed_pairs_in_insertion_order<K>(
+        pairs: Vec<(K, Self::EntryType)>,
+    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        pairs.into_iter().rev()
+    }
+
+    fn swap_remove_entry<K: Hash + Eq>(
         index: usize,
-    ) {
-        if *next_priority == Self::end_value() {
-            *next_priority = Self::start_value();
-        }
-
+        metadata: &mut Self::MetadataType,
+        queue: &mut indexmap::IndexMap<K, Self::EntryType, RandomState>,
+    ) -> (usize, Option<(K, Self::EntryType)>) {
         if index >= queue.len() {
-            return;
+            return (index, None);
         }
 
-        Self::assign_update_next_value(next_priority, &mut queue[index]);
+        if queue.len() == 1 {
+            // If there's only one entry, just remove it
+            return (index, queue.swap_remove_index(index));
+        }
 
-        let left_index = index * 2 + 1;
-        let right_index = index * 2 + 2;
+        let (k, e) = queue.swap_remove_index(index).unwrap();
+        if queue.len() == 1 {
+            metadata.head = 0;
+            metadata.tail = 0;
+            queue[0].prev = None;
+            queue[0].next = None;
+            return (index, Some((k, e)));
+        }
 
-        Self::re_index(queue, next_priority, left_index);
-        Self::re_index(queue, next_priority, right_index);
+        if index == metadata.head {
+            // Head was removed, update it
+            metadata.head = e.prev.unwrap_or_default();
+        }
+        if metadata.head == queue.len() {
+            // Head was pointing to the perturbed index
+            metadata.head = index;
+        }
+
+        if index == metadata.tail {
+            metadata.tail = e.next.unwrap_or_default();
+        }
+        if metadata.tail == queue.len() {
+            // Tail was pointing to the perturbed index
+            metadata.tail = index;
+        }
+
+        // Unlink the entry from the queue
+        if let Some(prev) = e.prev {
+            if prev == queue.len() {
+                queue[index].next = None;
+            } else {
+                queue[prev].next = e.next;
+            }
+        }
+        if let Some(next) = e.next {
+            if next == queue.len() {
+                queue[index].prev = None;
+            } else {
+                queue[next].prev = e.prev;
+            }
+        }
+
+        if index == queue.len() {
+            return (index, Some((k, e)));
+        }
+
+        // Update the links for the moved entry
+        if let Some(next) = queue[index].next {
+            debug_assert_eq!(queue[next].prev, Some(queue.len()));
+            queue[next].prev = Some(index);
+        }
+
+        if let Some(prev) = queue[index].prev {
+            debug_assert_eq!(queue[prev].next, Some(queue.len()));
+            queue[prev].next = Some(index);
+        }
+
+        (index, Some((k, e)))
     }
 }
 
@@ -160,995 +202,1104 @@ impl Policy for MruPolicy {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use indexmap::IndexMap;
+    use crate::Mru;
 
-    use super::*;
-    use crate::{
-        Cache,
-        Entry,
-        Mru,
-    };
+    #[test]
+    fn test_mru_trivial() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert("a", 1);
+        mru.insert("b", 2);
+        mru.insert("c", 3);
 
-    fn assert_heap_property<Key, Value>(mru: &Mru<Key, Value>) {
-        for i in 0..mru.queue.len() {
-            let left_idx = i * 2 + 1;
-            let right_idx = i * 2 + 2;
+        assert_eq!(mru.get(&"a"), Some(&1));
+        assert_eq!(mru.get(&"b"), Some(&2));
+        assert_eq!(mru.get(&"c"), Some(&3));
 
-            if left_idx < mru.queue.len() {
-                let parent_priority = mru.queue[i].priority;
-                let left_child_priority = mru.queue[left_idx].priority;
-                assert!(
-                    parent_priority >= left_child_priority,
-                    "Heap property violated: parent at index {} has priority {}, left child at index {} has priority {}",
-                    i,
-                    parent_priority,
-                    left_idx,
-                    left_child_priority
-                );
-            }
+        mru.get(&"a");
+        mru.insert("d", 4);
 
-            if right_idx < mru.queue.len() {
-                let parent_priority = mru.queue[i].priority;
-                let right_child_priority = mru.queue[right_idx].priority;
-                assert!(
-                    parent_priority >= right_child_priority,
-                    "Heap property violated: parent at index {} has priority {}, right child at index {} has priority {}",
-                    i,
-                    parent_priority,
-                    right_idx,
-                    right_child_priority
-                );
+        assert_eq!(mru.get(&"a"), None);
+        assert_eq!(mru.get(&"c"), Some(&3));
+    }
+
+    #[test]
+    fn test_mru_trivial_get_or_insert() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert("a", 1);
+        mru.insert("b", 2);
+        mru.insert("c", 3);
+
+        assert_eq!(mru.get_or_insert_with("a", |_| 10), &1);
+        assert_eq!(mru.get_or_insert_with("d", |_| 4), &4);
+        assert_eq!(mru.get(&"a"), None);
+        assert_eq!(mru.get(&"c"), Some(&3));
+    }
+
+    #[test]
+    fn test_mru_eviction_order() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
+
+        mru.insert(4, 40);
+
+        assert_eq!(mru.get(&1), Some(&10));
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), None);
+        assert_eq!(mru.get(&4), Some(&40));
+    }
+
+    #[test]
+    fn test_mru_access_makes_evictable() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
+
+        mru.get(&1);
+
+        mru.insert(4, 40);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.get(&4), Some(&40));
+    }
+
+    #[test]
+    fn test_mru_multiple_accesses() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+
+        mru.get(&1);
+        mru.get(&1);
+        mru.get(&1);
+
+        mru.insert(3, 30);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_mru_update_existing_key() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+
+        mru.insert(1, 100);
+
+        mru.insert(3, 30);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_mru_single_capacity() {
+        let mut mru = Mru::new(NonZeroUsize::new(1).unwrap());
+
+        mru.insert(1, 10);
+        assert_eq!(mru.get(&1), Some(&10));
+
+        mru.insert(2, 20);
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+
+        mru.get(&2);
+        mru.insert(3, 30);
+        assert_eq!(mru.get(&2), None);
+        assert_eq!(mru.get(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_mru_complex_access_pattern() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
+        mru.insert(4, 40);
+
+        mru.get(&2);
+        mru.get(&1);
+        mru.get(&3);
+
+        mru.insert(5, 50);
+
+        assert_eq!(mru.get(&1), Some(&10));
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), None);
+        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(mru.get(&5), Some(&50));
+    }
+
+    #[test]
+    fn test_mru_interleaved_operations() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.get(&1);
+        mru.insert(3, 30);
+        mru.get(&2);
+        mru.insert(4, 40);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), None);
+        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.get(&4), Some(&40));
+    }
+
+    #[test]
+    fn test_mru_get_or_insert_with_eviction() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+
+        mru.get(&1);
+
+        let value = mru.get_or_insert_with(3, |_| 30);
+        assert_eq!(value, &30);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_mru_get_or_insert_existing_key() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
+
+        let value = mru.get_or_insert_with(1, |_| 999);
+        assert_eq!(value, &10);
+
+        mru.insert(4, 40);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.get(&4), Some(&40));
+    }
+
+    #[test]
+    fn test_mru_sequential_pattern() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        for i in 1..=10 {
+            mru.insert(i, i * 10);
+        }
+
+        assert_eq!(mru.get(&10), Some(&100));
+
+        let mut count = 0;
+        for i in 1..=10 {
+            if mru.get(&i).is_some() {
+                count += 1;
             }
         }
+        assert_eq!(count, 3);
     }
 
     #[test]
-    fn test_assign_update_next_value() {
-        let mut cache_next = 100u64;
-        let mut entry = Entry {
-            priority: 0,
-            value: "test",
-        };
+    fn test_mru_no_access_pattern() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
-        MruPolicy::assign_update_next_value(&mut cache_next, &mut entry);
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
 
-        assert_eq!(entry.priority, 100);
-        assert_eq!(cache_next, 101);
+        mru.insert(4, 40);
+
+        assert_eq!(mru.get(&1), Some(&10));
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), None);
+        assert_eq!(mru.get(&4), Some(&40));
     }
 
     #[test]
-    fn test_assign_update_next_value_wrapping() {
-        let mut cache_next = u64::MAX;
-        let mut entry = Entry {
-            priority: 0,
-            value: "test",
-        };
+    fn test_mru_alternating_access() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
-        MruPolicy::assign_update_next_value(&mut cache_next, &mut entry);
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
 
-        assert_eq!(entry.priority, u64::MAX);
-        assert_eq!(cache_next, 0);
+        mru.get(&1);
+        mru.get(&2);
+        mru.get(&1);
+        mru.get(&2);
+
+        mru.insert(4, 40);
+
+        assert_eq!(mru.get(&1), Some(&10));
+        assert_eq!(mru.get(&2), None);
+        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.get(&4), Some(&40));
     }
 
     #[test]
-    fn test_heap_bubble_single_element() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-        queue.insert(
-            1,
-            Entry {
-                priority: 100,
-                value: "one",
-            },
-        );
+    fn test_mru_repeated_access_single_key() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
-        let result = MruPolicy::heap_bubble(0, &mut queue);
-        assert_eq!(result, 0);
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+
+        for _ in 0..100 {
+            mru.get(&1);
+        }
+
+        mru.insert(3, 30);
+
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), Some(&30));
     }
 
     #[test]
-    fn test_heap_bubble_two_elements_no_swap() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-        queue.insert(
-            1,
-            Entry {
-                priority: 200,
-                value: "one",
-            },
-        );
-        queue.insert(
-            2,
-            Entry {
-                priority: 100,
-                value: "two",
-            },
-        );
+    fn test_mru_empty_cache() {
+        let mut mru = Mru::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
-        let result = MruPolicy::heap_bubble(1, &mut queue);
-        assert_eq!(result, 1);
-        assert_eq!(queue[0].priority, 200);
-        assert_eq!(queue[1].priority, 100);
+        assert!(mru.is_empty());
+        assert_eq!(mru.len(), 0);
+        assert_eq!(mru.capacity(), 3);
+        assert_eq!(mru.get(&1), None);
+        assert_eq!(mru.peek(&1), None);
+        assert_eq!(mru.remove(&1), None);
+        assert_eq!(mru.pop(), None);
+        assert!(mru.tail().is_none());
+        assert!(!mru.contains_key(&1));
     }
 
     #[test]
-    fn test_heap_bubble_two_elements_with_swap() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-        queue.insert(
-            1,
-            Entry {
-                priority: 100,
-                value: "one",
-            },
-        );
-        queue.insert(
-            2,
-            Entry {
-                priority: 200,
-                value: "two",
-            },
-        );
+    fn test_mru_capacity_constraints() {
+        let mru = Mru::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
+        assert_eq!(mru.capacity(), 5);
 
-        let result = MruPolicy::heap_bubble(1, &mut queue);
-        assert_eq!(result, 0);
-        assert_eq!(queue[0].priority, 200);
-        assert_eq!(queue[1].priority, 100);
+        let mru = Mru::<i32, i32>::new(NonZeroUsize::new(1).unwrap());
+        assert_eq!(mru.capacity(), 1);
+
+        let mru = Mru::<i32, i32>::new(NonZeroUsize::new(100).unwrap());
+        assert_eq!(mru.capacity(), 100);
     }
 
     #[test]
-    fn test_mru_cache_basic_operations() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    fn test_mru_peek_no_side_effects() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
 
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.capacity(), 3);
+        assert_eq!(mru.peek(&3), Some(&30));
 
-        cache.insert(1, "one".to_string());
-        assert_eq!(cache.len(), 1);
-        assert!(!cache.is_empty());
-        assert!(cache.contains_key(&1));
+        mru.insert(4, 40);
 
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
-        assert_eq!(cache.len(), 3);
-        assert_heap_property(&cache);
+        assert_eq!(mru.get(&1), Some(&10));
+        assert_eq!(mru.get(&2), Some(&20));
+        assert_eq!(mru.get(&3), None);
+        assert_eq!(mru.get(&4), Some(&40));
     }
 
     #[test]
-    fn test_mru_cache_eviction_policy() {
-        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+    fn test_mru_contains_key() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
+        assert!(!mru.contains_key(&1));
 
-        cache.get(&1);
+        mru.insert(1, 10);
+        assert!(mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
 
-        cache.insert(3, "three".to_string());
+        mru.insert(2, 20);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
 
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert_heap_property(&cache);
+        mru.insert(3, 30);
+        assert!(mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
     }
 
     #[test]
-    fn test_mru_cache_get_updates_priority() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    fn test_mru_remove() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
+        assert_eq!(mru.remove(&2), Some(20));
+        assert_eq!(mru.len(), 2);
+        assert!(!mru.contains_key(&2));
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&3));
 
-        let oldest_before = cache.tail().map(|(k, _)| *k);
+        assert_eq!(mru.remove(&2), None);
+        assert_eq!(mru.len(), 2);
 
-        cache.get(&1);
-
-        let oldest_after = cache.tail().map(|(k, _)| *k);
-        assert_ne!(oldest_before, oldest_after);
-        assert_heap_property(&cache);
+        mru.insert(4, 40);
+        assert_eq!(mru.len(), 3);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
     }
 
     #[test]
-    fn test_mru_cache_peek_does_not_update_priority() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    fn test_mru_pop() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
+        let popped = mru.pop();
+        assert!(popped.is_some());
+        assert_eq!(mru.len(), 2);
 
-        let oldest_before = cache.tail().map(|(k, _)| *k);
+        let popped = mru.pop();
+        assert!(popped.is_some());
+        assert_eq!(mru.len(), 1);
 
-        cache.peek(&1);
+        let popped = mru.pop();
+        assert!(popped.is_some());
+        assert_eq!(mru.len(), 0);
+        assert!(mru.is_empty());
 
-        let oldest_after = cache.tail().map(|(k, _)| *k);
-        assert_eq!(oldest_before, oldest_after);
+        let popped = mru.pop();
+        assert_eq!(popped, None);
     }
 
     #[test]
-    fn test_mru_cache_get_or_insert_with() {
-        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+    fn test_mru_tail() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
-        let value = cache.get_or_insert_with(1, |_| "one".to_string());
-        assert_eq!(value, "one");
-        assert_eq!(cache.len(), 1);
+        assert!(mru.tail().is_none());
 
-        let value = cache.get_or_insert_with(1, |_| "different".to_string());
-        assert_eq!(value, "one");
-        assert_eq!(cache.len(), 1);
+        mru.insert(1, 10);
+        assert_eq!(mru.tail(), Some((&1, &10)));
+
+        mru.insert(2, 20);
+        assert_eq!(mru.tail(), Some((&2, &20)));
+
+        mru.insert(3, 30);
+        assert_eq!(mru.tail(), Some((&3, &30)));
+
+        mru.get(&2);
+
+        assert_eq!(mru.tail(), Some((&2, &20)));
     }
 
     #[test]
-    fn test_mru_cache_remove() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    fn test_mru_clear() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
+        assert_eq!(mru.len(), 3);
+        assert!(!mru.is_empty());
 
-        let removed = cache.remove(&1);
-        assert_eq!(removed, Some("one".to_string()));
-        assert!(!cache.contains_key(&1));
-        assert_eq!(cache.len(), 2);
-        let youngest = cache.tail().map(|(k, _)| *k);
-        assert_eq!(youngest, Some(3));
-        assert_heap_property(&cache);
+        mru.clear();
 
-        let removed = cache.remove(&1);
-        assert_eq!(removed, None);
+        assert_eq!(mru.len(), 0);
+        assert!(mru.is_empty());
+        assert_eq!(mru.capacity(), 3);
+        assert!(!mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
+        assert!(mru.tail().is_none());
     }
 
     #[test]
-    fn test_mru_cache_pop() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    fn test_mru_mutable_access() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert(1, String::from("hello"));
+        mru.insert(2, String::from("world"));
+        mru.insert(3, String::from("test"));
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
+        if let Some(val) = mru.get_mut(&1) {
+            val.push_str(" modified");
+        }
 
-        cache.get(&1);
-        cache.get(&3);
-        let (_key, _value) = cache.pop().unwrap();
-        assert_eq!(cache.len(), 2);
-        assert_heap_property(&cache);
+        assert_eq!(mru.get(&1), Some(&String::from("hello modified")));
 
-        let mut empty_cache = Mru::<i32, String>::new(NonZeroUsize::new(1).unwrap());
-        assert!(empty_cache.pop().is_none());
+        mru.insert(4, String::from("new"));
+
+        assert!(!mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
     }
 
     #[test]
-    fn test_mru_cache_clear() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    fn test_mru_insert_mut() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
+        let val = mru.insert_mut(1, String::from("test"));
+        val.push_str(" modified");
 
-        cache.clear();
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
+        assert_eq!(mru.get(&1), Some(&String::from("test modified")));
+
+        let val = mru.insert_mut(1, String::from("replaced"));
+        val.push_str(" again");
+
+        assert_eq!(mru.get(&1), Some(&String::from("replaced again")));
     }
 
     #[test]
-    fn test_mru_cache_retain() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
+    fn test_mru_get_or_insert_with_mut() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+        mru.insert(1, String::from("existing"));
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
-        cache.insert(4, "four".to_string());
+        let val = mru.get_or_insert_with_mut(1, |_| String::from("new"));
+        val.push_str(" modified");
 
-        cache.retain(|&k, _| k % 2 == 0);
+        assert_eq!(mru.get(&1), Some(&String::from("existing modified")));
 
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-        assert_eq!(cache.len(), 2);
-        assert_heap_property(&cache);
+        let val = mru.get_or_insert_with_mut(2, |_| String::from("created"));
+        val.push_str(" also modified");
+
+        assert_eq!(mru.get(&2), Some(&String::from("created also modified")));
+
+        mru.insert(3, String::from("third"));
+        assert!(mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
     }
 
     #[test]
-    fn test_mru_retain_empty_cache() {
-        let mut cache = Mru::<i32, String>::new(NonZeroUsize::new(5).unwrap());
+    fn test_mru_extend() {
+        let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
+        mru.insert(1, 10);
 
-        cache.retain(|_, _| true);
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
+        let items = vec![(2, 20), (3, 30), (4, 40)];
+        mru.extend(items);
 
-        cache.retain(|_, _| false);
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 4);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
     }
 
     #[test]
-    fn test_mru_retain_all_elements() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
+    fn test_mru_from_iterator() {
+        let items = vec![(1, 10), (2, 20), (3, 30)];
+        let mru: Mru<i32, i32> = items.into_iter().collect();
+
+        assert_eq!(mru.len(), 3);
+        assert_eq!(mru.capacity(), 3);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+    }
+
+    #[test]
+    fn test_mru_from_iterator_with_eviction() {
+        let items = vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)];
+        let mru: Mru<i32, i32> = items.into_iter().collect();
+
+        assert_eq!(mru.len(), 5);
+        assert_eq!(mru.capacity(), 5);
 
         for i in 1..=5 {
-            cache.insert(i, format!("value_{}", i));
+            assert!(mru.contains_key(&i));
+        }
+    }
+
+    #[test]
+    fn test_mru_shrink_to_fit() {
+        let mut mru = Mru::new(NonZeroUsize::new(10).unwrap());
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+
+        mru.shrink_to_fit();
+
+        assert_eq!(mru.len(), 2);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+    }
+
+    #[test]
+    fn test_mru_eviction_policy_consistency() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        mru.insert(1, "first");
+        mru.insert(2, "second");
+        mru.insert(3, "third");
+        mru.insert(4, "fourth");
+
+        mru.get(&2);
+        mru.get(&1);
+        mru.get(&3);
+
+        mru.insert(5, "fifth");
+
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+
+        mru.get(&1);
+
+        mru.insert(6, "sixth");
+
+        assert!(!mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+        assert!(mru.contains_key(&6));
+    }
+
+    #[test]
+    fn test_mru_stress_operations() {
+        let mut mru = Mru::new(NonZeroUsize::new(10).unwrap());
+
+        for i in 0..20 {
+            mru.insert(i, i * 10);
         }
 
-        cache.retain(|_, _| true);
+        assert_eq!(mru.len(), 10);
 
-        assert_eq!(cache.len(), 5);
+        for i in 10..20 {
+            mru.get(&i);
+            if i % 3 == 0 {
+                mru.remove(&(i - 5));
+            }
+        }
+
+        assert!(mru.len() <= 10);
+    }
+
+    #[test]
+    fn test_mru_boundary_conditions() {
+        let mut mru = Mru::new(NonZeroUsize::new(1000).unwrap());
+        for i in 0..500 {
+            mru.insert(i, i);
+        }
+        assert_eq!(mru.len(), 500);
+
+        for i in 500..1000 {
+            mru.insert(i, i);
+        }
+        assert_eq!(mru.len(), 1000);
+
+        mru.insert(1000, 1000);
+        assert_eq!(mru.len(), 1000);
+        assert!(mru.contains_key(&1000));
+    }
+
+    #[test]
+    fn test_mru_consistent_state_after_operations() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, 100);
+        mru.insert(2, 200);
+        assert_eq!(mru.len(), 2);
+
+        mru.get(&1);
+        mru.insert(3, 300);
+        assert_eq!(mru.len(), 3);
+
+        mru.remove(&2);
+        assert_eq!(mru.len(), 2);
+        assert!(!mru.contains_key(&2));
+
+        mru.insert(4, 400);
+        mru.insert(5, 500);
+        assert_eq!(mru.len(), 3);
+
+        assert!(mru.tail().is_some());
+        let mut count = 0;
         for i in 1..=5 {
-            assert!(cache.contains_key(&i));
+            if mru.contains_key(&i) {
+                count += 1;
+            }
         }
-        assert_heap_property(&cache);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_mru_key_value_types() {
+        let mut mru_str = Mru::new(NonZeroUsize::new(2).unwrap());
+        mru_str.insert("key1", 1);
+        mru_str.insert("key2", 2);
+        assert!(mru_str.contains_key(&"key1"));
+
+        let mut mru_vec = Mru::new(NonZeroUsize::new(2).unwrap());
+        mru_vec.insert(1, vec![1, 2, 3]);
+        mru_vec.insert(2, vec![4, 5, 6]);
+        assert_eq!(mru_vec.get(&1), Some(&vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_mru_insertion_order_vs_access_order() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
+
+        mru.insert(4, 40);
+
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+
+        mru.get(&1);
+        mru.insert(5, 50);
+
+        assert!(!mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+    }
+
+    #[test]
+    fn test_mru_recency_tracking() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        mru.insert(1, 10);
+        mru.insert(2, 20);
+        mru.insert(3, 30);
+        mru.insert(4, 40);
+
+        mru.get(&2);
+        mru.get(&4);
+        mru.get(&1);
+
+        mru.insert(5, 50);
+
+        assert!(!mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+
+        mru.get(&3);
+        mru.insert(6, 60);
+
+        assert!(mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+        assert!(mru.contains_key(&6));
+    }
+
+    #[test]
+    fn test_mru_from_iterator_overlapping_keys() {
+        let items = vec![
+            (1, "first"),
+            (2, "second"),
+            (1, "updated_first"),
+            (3, "third"),
+            (2, "updated_second"),
+            (1, "final_first"),
+        ];
+
+        let mru: Mru<i32, &str> = items.into_iter().collect();
+
+        assert_eq!(mru.len(), 3);
+        assert_eq!(mru.capacity(), 3);
+
+        assert_eq!(mru.peek(&1), Some(&"final_first"));
+        assert_eq!(mru.peek(&2), Some(&"updated_second"));
+        assert_eq!(mru.peek(&3), Some(&"third"));
+
+        assert_eq!(mru.tail(), Some((&1, &"final_first")));
+    }
+
+    #[test]
+    fn test_mru_from_iterator_overlapping_with_eviction() {
+        let items = vec![
+            (1, "one"),
+            (2, "two"),
+            (3, "three"),
+            (4, "four"),
+            (5, "five"),
+            (1, "updated_one"),
+            (6, "six"),
+        ];
+
+        let mru: Mru<i32, &str> = items.into_iter().collect();
+
+        assert_eq!(mru.len(), 6);
+        assert_eq!(mru.capacity(), 6);
+
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+        assert!(mru.contains_key(&6));
+
+        assert_eq!(mru.peek(&1), Some(&"updated_one"));
+    }
+
+    #[test]
+    fn test_mru_from_iterator_many_duplicates() {
+        let items = vec![
+            (1, 100),
+            (1, 200),
+            (1, 300),
+            (2, 400),
+            (1, 500),
+            (2, 600),
+            (1, 700),
+        ];
+
+        let mru: Mru<i32, i32> = items.into_iter().collect();
+
+        assert_eq!(mru.len(), 2);
+        assert_eq!(mru.capacity(), 2);
+
+        assert_eq!(mru.peek(&1), Some(&700));
+        assert_eq!(mru.peek(&2), Some(&600));
+
+        assert_eq!(mru.tail(), Some((&1, &700)));
+    }
+
+    #[test]
+    fn test_mru_from_iterator_access_order_behavior() {
+        let items = vec![
+            (1, "one"),
+            (2, "two"),
+            (3, "three"),
+            (2, "updated_two"),
+            (4, "four"),
+            (1, "updated_one"),
+        ];
+
+        let mut mru: Mru<i32, &str> = items.into_iter().collect();
+
+        assert_eq!(mru.len(), 4);
+
+        assert_eq!(mru.tail(), Some((&1, &"updated_one")));
+
+        mru.insert(5, "five");
+
+        assert!(!mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+    }
+
+    #[test]
+    fn test_mru_retain_basic() {
+        let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
+        mru.insert(5, "five");
+
+        mru.retain(|&k, _| k % 2 == 0);
+
+        assert_eq!(mru.len(), 2);
+        assert!(!mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(!mru.contains_key(&5));
+    }
+
+    #[test]
+    fn test_mru_retain_with_recency_considerations() {
+        let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
+        mru.insert(5, "five");
+
+        mru.get(&1);
+        mru.get(&3);
+        mru.get(&2);
+
+        mru.retain(|&k, v| k <= 3 && v.len() > 3);
+
+        assert_eq!(mru.len(), 1);
+        assert!(!mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(!mru.contains_key(&4));
+        assert!(!mru.contains_key(&5));
+    }
+
+    #[test]
+    fn test_mru_retain_all() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        mru.retain(|_, _| true);
+
+        assert_eq!(mru.len(), 3);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
     }
 
     #[test]
     fn test_mru_retain_none() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
-        for i in 1..=5 {
-            cache.insert(i, format!("value_{}", i));
-        }
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
 
-        cache.retain(|_, _| false);
+        mru.retain(|_, _| false);
 
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
-        for i in 1..=5 {
-            assert!(!cache.contains_key(&i));
-        }
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 0);
+        assert!(mru.is_empty());
+        assert!(!mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
     }
 
     #[test]
-    fn test_mru_retain_with_recency_patterns() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
+    fn test_mru_retain_empty_cache() {
+        let mut mru = Mru::<i32, &str>::new(NonZeroUsize::new(3).unwrap());
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
-        cache.insert(4, "four".to_string());
-        cache.insert(5, "five".to_string());
+        mru.retain(|_, _| true);
 
-        cache.get(&1);
-        cache.get(&3);
-        cache.get(&5);
-
-        cache.retain(|&k, _| k == 1 || k == 3 || k == 5);
-
-        assert_eq!(cache.len(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(!cache.contains_key(&4));
-        assert!(cache.contains_key(&5));
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 0);
+        assert!(mru.is_empty());
     }
 
     #[test]
-    fn test_mru_retain_modify_values() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
+    fn test_mru_retain_single_item() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
-        cache.insert(1, 10);
-        cache.insert(2, 20);
-        cache.insert(3, 30);
-        cache.insert(4, 40);
-        cache.insert(5, 50);
+        mru.insert(1, "one");
 
-        cache.retain(|&k, v| {
-            if k % 2 == 0 {
-                *v *= 2;
-                true
-            } else {
-                false
-            }
-        });
+        mru.retain(|&k, _| k == 1);
 
-        assert_eq!(cache.len(), 2);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-        assert!(!cache.contains_key(&5));
+        assert_eq!(mru.len(), 1);
+        assert!(mru.contains_key(&1));
 
-        assert_eq!(cache.peek(&2), Some(&40));
-        assert_eq!(cache.peek(&4), Some(&80));
-        assert_heap_property(&cache);
+        mru.retain(|&k, _| k != 1);
+
+        assert_eq!(mru.len(), 0);
+        assert!(!mru.contains_key(&1));
     }
 
     #[test]
-    fn test_mru_retain_single_element() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
-        cache.insert(42, "answer".to_string());
+    fn test_mru_retain_recency_preservation() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
-        cache.retain(|&k, _| k == 42);
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains_key(&42));
-        assert_heap_property(&cache);
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
 
-        cache.retain(|&k, _| k != 42);
-        assert!(cache.is_empty());
-        assert!(!cache.contains_key(&42));
-        assert_heap_property(&cache);
-    }
+        mru.retain(|&k, _| k == 1 || k == 3);
 
-    #[test]
-    fn test_mru_retain_heap_property_after_removal() {
-        let mut cache = Mru::new(NonZeroUsize::new(10).unwrap());
+        assert_eq!(mru.len(), 2);
+        assert!(mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
 
-        for i in 1..=10 {
-            cache.insert(i, format!("value_{}", i));
-        }
+        assert_eq!(mru.tail(), Some((&3, &"three")));
+        mru.insert(4, "four");
 
-        for i in &[1, 3, 5, 7, 9] {
-            cache.get(i);
-        }
-
-        cache.retain(|&k, _| k > 5);
-
-        assert_eq!(cache.len(), 5);
-        for i in 1..=5 {
-            assert!(!cache.contains_key(&i));
-        }
-        for i in 6..=10 {
-            assert!(cache.contains_key(&i));
-        }
-        assert_heap_property(&cache);
-
-        cache.insert(11, "eleven".to_string());
-        cache.get(&7);
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_retain_with_duplicates_and_reinserts() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
-
-        for i in 1..=5 {
-            cache.insert(i, i);
-        }
-
-        cache.get(&1);
-        cache.get(&3);
-        cache.get(&5);
-
-        cache.retain(|&k, _| k % 2 == 1);
-        assert_eq!(cache.len(), 3);
-        assert_heap_property(&cache);
-
-        cache.insert(2, 200);
-        cache.insert(4, 400);
-        cache.insert(6, 600);
-
-        assert_eq!(cache.len(), 5);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&5));
-        assert!(cache.contains_key(&6));
-        assert_heap_property(&cache);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert_eq!(mru.len(), 3);
     }
 
     #[test]
     fn test_mru_retain_stress_test() {
-        let mut cache = Mru::new(NonZeroUsize::new(100).unwrap());
+        let mut mru = Mru::new(NonZeroUsize::new(100).unwrap());
 
         for i in 0..100 {
-            cache.insert(i, format!("value_{}", i));
-        }
+            mru.insert(i, i * 10);
 
-        for i in 0..50 {
-            cache.get(&(i % 25));
-        }
-
-        cache.retain(|&k, v| {
-            let should_retain = k % 3 == 0 || k % 7 == 0;
-            if should_retain {
-                *v = format!("retained_{}", k);
+            if i % 3 == 0 {
+                mru.get(&i);
             }
-            should_retain
-        });
+        }
 
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 100);
+
+        mru.retain(|&k, _| k % 3 == 0);
+
+        let expected_len = (0..100).filter(|&x| x % 3 == 0).count();
+        assert_eq!(mru.len(), expected_len);
 
         for i in 0..100 {
-            if i % 3 == 0 || i % 7 == 0 {
-                if cache.contains_key(&i) {
-                    assert_eq!(cache.peek(&i), Some(&format!("retained_{}", i)));
-                }
+            if i % 3 == 0 {
+                assert!(mru.contains_key(&i));
             } else {
-                assert!(!cache.contains_key(&i));
+                assert!(!mru.contains_key(&i));
             }
         }
     }
 
     #[test]
-    fn test_mru_retain_capacity_one() {
-        let mut cache = Mru::new(NonZeroUsize::new(1).unwrap());
-        cache.insert(1, "one".to_string());
+    fn test_mru_retain_after_operations() {
+        let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
 
-        cache.retain(|_, _| true);
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains_key(&1));
-        assert_heap_property(&cache);
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
+        mru.insert(5, "five");
 
-        cache.retain(|_, _| false);
-        assert!(cache.is_empty());
-        assert_heap_property(&cache);
+        mru.get(&1);
+        mru.get(&3);
+        mru.remove(&2);
+        mru.get(&4);
 
-        cache.insert(2, "two".to_string());
-        cache.retain(|&k, _| k > 1);
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains_key(&2));
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 4);
+
+        mru.retain(|&k, _| k > 2);
+
+        assert_eq!(mru.len(), 3);
+        assert!(!mru.contains_key(&1));
+        assert!(!mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&5));
+
+        mru.insert(6, "six");
+        mru.get(&3);
+        assert_eq!(mru.len(), 4);
     }
 
     #[test]
-    fn test_mru_retain_and_mru_behavior() {
-        let mut cache = Mru::new(NonZeroUsize::new(4).unwrap());
+    fn test_mru_retain_linked_list_consistency() {
+        let mut mru = Mru::new(NonZeroUsize::new(10).unwrap());
 
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
-        cache.insert(4, "four".to_string());
+        for i in 1..=10 {
+            mru.insert(i, format!("value_{}", i));
 
-        cache.get(&2);
-        cache.get(&1);
-        cache.get(&4);
-
-        cache.retain(|&k, _| k == 3 || k == 2);
-
-        assert_eq!(cache.len(), 2);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(!cache.contains_key(&4));
-        assert_heap_property(&cache);
-
-        cache.insert(5, "five".to_string());
-        cache.insert(6, "six".to_string());
-        cache.insert(7, "seven".to_string());
-
-        assert_eq!(cache.len(), 4);
-        assert!(cache.contains_key(&2) || cache.contains_key(&3));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_retain_preserves_access_order() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
-
-        for i in 1..=5 {
-            cache.insert(i, format!("value_{}", i));
-        }
-
-        cache.get(&3);
-        cache.get(&1);
-        cache.get(&4);
-
-        let most_recent_before = cache.tail().map(|(k, _)| *k);
-
-        cache.retain(|_, _| true);
-
-        let most_recent_after = cache.tail().map(|(k, _)| *k);
-
-        assert_eq!(most_recent_before, most_recent_after);
-        assert_heap_property(&cache);
-
-        cache.insert(6, "six".to_string());
-        cache.insert(7, "seven".to_string());
-
-        assert!(cache.len() <= 5);
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_retain_vs_lru_behavior() {
-        let mut mru_cache = Mru::new(NonZeroUsize::new(3).unwrap());
-        let mut lru_cache = crate::Lru::new(NonZeroUsize::new(3).unwrap());
-
-        for i in 1..=3 {
-            mru_cache.insert(i, format!("value_{}", i));
-            lru_cache.insert(i, format!("value_{}", i));
-        }
-
-        mru_cache.get(&1);
-        lru_cache.get(&1);
-
-        mru_cache.retain(|&k, _| k == 1);
-        lru_cache.retain(|&k, _| k == 1);
-
-        assert_eq!(mru_cache.len(), 1);
-        assert_eq!(lru_cache.len(), 1);
-        assert!(mru_cache.contains_key(&1));
-        assert!(lru_cache.contains_key(&1));
-
-        mru_cache.insert(4, "four".to_string());
-        mru_cache.insert(5, "five".to_string());
-        lru_cache.insert(4, "four".to_string());
-        lru_cache.insert(5, "five".to_string());
-
-        mru_cache.get(&1);
-        lru_cache.get(&1);
-
-        mru_cache.insert(6, "six".to_string());
-        lru_cache.insert(6, "six".to_string());
-
-        assert!(!mru_cache.contains_key(&1));
-        assert!(lru_cache.contains_key(&1));
-
-        assert_heap_property(&mru_cache);
-    }
-
-    #[test]
-    fn test_mru_cache_extend() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
-
-        cache.insert(1, "one".to_string());
-
-        let items = vec![(2, "two".to_string()), (3, "three".to_string())];
-        cache.extend(items);
-
-        assert_eq!(cache.len(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_cache_from_iterator() {
-        let items = vec![
-            (1, "one".to_string()),
-            (2, "two".to_string()),
-            (3, "three".to_string()),
-        ];
-
-        let cache: Mru<i32, String> = items.into_iter().collect();
-
-        assert_eq!(cache.len(), 3);
-        assert_eq!(cache.capacity(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_cache_priority_wraparound() {
-        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
-
-        for i in 0..u64::MAX {
-            cache.insert(i as i32, format!("value{}", i));
-            if i % 1000000 == 0 && i > 0 {
-                break;
+            if i % 2 == 0 {
+                mru.get(&i);
             }
         }
 
-        assert_eq!(cache.len(), 2);
-    }
+        mru.retain(|&k, _| k % 2 == 0);
 
-    #[test]
-    fn test_mru_cache_shrink_to_fit() {
-        let mut cache = Mru::new(NonZeroUsize::new(10).unwrap());
-
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-
-        cache.shrink_to_fit();
-
-        assert_eq!(cache.len(), 2);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_cache_mutable_operations() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
-
-        let value_ref = cache.insert_mut(1, "one".to_string());
-        value_ref.push_str(" modified");
-        assert_eq!(cache.peek(&1), Some(&"one modified".to_string()));
-
-        if let Some(value_ref) = cache.get_mut(&1) {
-            value_ref.push_str(" again");
-        }
-        assert_eq!(cache.peek(&1), Some(&"one modified again".to_string()));
-
-        let value_ref = cache.get_or_insert_with_mut(2, |_| "two".to_string());
-        value_ref.push_str(" new");
-        assert_eq!(cache.peek(&2), Some(&"two new".to_string()));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_vs_lru_behavior_difference() {
-        use crate::{
-            Lru,
-            Mru,
-        };
-
-        let mut mru_cache: Mru<i32, String> = Cache::new(NonZeroUsize::new(2).unwrap());
-        let mut lru_cache: Lru<i32, String> = Cache::new(NonZeroUsize::new(2).unwrap());
-
-        mru_cache.insert(1, "one".to_string());
-        mru_cache.insert(2, "two".to_string());
-        lru_cache.insert(1, "one".to_string());
-        lru_cache.insert(2, "two".to_string());
-
-        mru_cache.get(&1);
-        lru_cache.get(&1);
-
-        mru_cache.insert(3, "three".to_string());
-        lru_cache.insert(3, "three".to_string());
-
-        assert!(mru_cache.contains_key(&2));
-        assert!(lru_cache.contains_key(&1));
-
-        assert!(!mru_cache.contains_key(&1));
-        assert!(!lru_cache.contains_key(&2));
-
-        assert!(mru_cache.contains_key(&3));
-        assert!(lru_cache.contains_key(&3));
-        assert_heap_property(&mru_cache);
-    }
-
-    #[test]
-    fn test_edge_case_empty_heap_bubble() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-        let result = MruPolicy::heap_bubble(0, &mut queue);
-        assert_eq!(result, 0);
-    }
-
-    #[test]
-    fn test_edge_case_capacity_one() {
-        let mut cache = Mru::new(NonZeroUsize::new(1).unwrap());
-
-        cache.insert(1, "one".to_string());
-        assert_eq!(cache.len(), 1);
-
-        cache.insert(2, "two".to_string());
-        assert_eq!(cache.len(), 1);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-    }
-
-    #[test]
-    fn test_priority_ordering_consistency() {
-        let mut cache = Mru::new(NonZeroUsize::new(5).unwrap());
-
-        cache.insert(1, "one".to_string());
-        cache.insert(2, "two".to_string());
-        cache.insert(3, "three".to_string());
-
-        cache.get(&1);
-        cache.get(&2);
-
-        let youngest = cache.tail().map(|(k, _)| *k);
-        assert_eq!(youngest, Some(2));
-
-        cache.get(&3);
-        let youngest = cache.tail().map(|(k, _)| *k);
-        assert_eq!(youngest, Some(3));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_re_index_functionality() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-
-        queue.insert(
-            1,
-            Entry {
-                priority: 100,
-                value: "one",
-            },
-        );
-        queue.insert(
-            2,
-            Entry {
-                priority: 200,
-                value: "two",
-            },
-        );
-        queue.insert(
-            3,
-            Entry {
-                priority: 150,
-                value: "three",
-            },
-        );
-        queue.insert(
-            4,
-            Entry {
-                priority: 75,
-                value: "four",
-            },
-        );
-
-        let mut next_priority = u64::MAX;
-
-        MruPolicy::re_index(&mut queue, &mut next_priority, 0);
-
-        assert!(queue[0].priority < u64::MAX);
-        assert!(queue[1].priority < u64::MAX);
-        assert!(queue[2].priority < u64::MAX);
-        assert!(queue[3].priority < u64::MAX);
-
-        assert!(next_priority > u64::MIN);
-        assert!(next_priority < u64::MAX);
-
-        let priorities: std::collections::HashSet<u64> =
-            queue.values().map(|entry| entry.priority).collect();
-        assert_eq!(
-            priorities.len(),
-            4,
-            "All priorities should be unique after re-indexing"
-        );
-    }
-
-    #[test]
-    fn test_mru_re_index_maintains_relative_order() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-
-        queue.insert(
-            1,
-            Entry {
-                priority: 10,
-                value: "oldest",
-            },
-        );
-        queue.insert(
-            2,
-            Entry {
-                priority: 20,
-                value: "middle",
-            },
-        );
-        queue.insert(
-            3,
-            Entry {
-                priority: 30,
-                value: "newest",
-            },
-        );
-
-        let mut next_priority = u64::MAX;
-
-        MruPolicy::re_index(&mut queue, &mut next_priority, 0);
-
-        assert!(queue.get(&1).unwrap().priority < queue.get(&2).unwrap().priority);
-        assert!(queue.get(&2).unwrap().priority < queue.get(&3).unwrap().priority);
-
-        for (_, entry) in queue.iter() {
-            assert!(entry.priority < u64::MAX);
-        }
-    }
-
-    #[test]
-    fn test_mru_re_index_edge_cases() {
-        let mut queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-        queue.insert(
-            1,
-            Entry {
-                priority: 100,
-                value: "only",
-            },
-        );
-
-        let mut next_priority = u64::MAX;
-        MruPolicy::re_index(&mut queue, &mut next_priority, 0);
-
-        assert_eq!(queue.len(), 1);
-        assert!(queue[0].priority < u64::MAX);
-        assert!(next_priority > u64::MIN);
-
-        let mut empty_queue: IndexMap<i32, Entry<&str>, RandomState> = IndexMap::default();
-        let mut next_priority_empty = u64::MAX;
-        MruPolicy::re_index(&mut empty_queue, &mut next_priority_empty, 0);
-
-        assert_eq!(empty_queue.len(), 0);
-        assert_eq!(next_priority_empty, u64::MIN);
-    }
-
-    #[test]
-    fn test_mru_cache_insert_same_key_multiple_times() {
-        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
-
-        cache.insert(1, "first");
-        cache.insert(2, "second");
-
-        cache.insert(1, "updated_first");
-        assert_eq!(cache.peek(&1), Some(&"updated_first"));
-        assert_eq!(cache.len(), 2);
-
-        cache.insert(3, "third");
-
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert_heap_property(&cache);
-    }
-
-    #[test]
-    fn test_mru_cache_alternating_access_pattern() {
-        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
-
-        cache.insert(1, "one");
-        cache.insert(2, "two");
-        cache.insert(3, "three");
-
-        for _ in 0..10 {
-            cache.get(&1);
-            cache.get(&2);
+        assert_eq!(mru.len(), 5);
+        for i in 1..=10 {
+            if i % 2 == 0 {
+                assert!(mru.contains_key(&i));
+            } else {
+                assert!(!mru.contains_key(&i));
+            }
         }
 
-        cache.insert(4, "four");
-
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-        assert_heap_property(&cache);
+        mru.insert(12, "new_item".to_string());
+        assert_eq!(mru.len(), 6);
     }
 
     #[test]
-    fn test_mru_cache_get_or_insert_with_eviction() {
-        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+    fn test_mru_retain_with_tail_tracking() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
-        cache.insert(1, "one");
-        cache.insert(2, "two");
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
 
-        cache.get(&1);
+        mru.get(&2);
+        mru.get(&4);
+        mru.get(&1);
 
-        let value = cache.get_or_insert_with(3, |_| "three");
-        assert_eq!(*value, "three");
-        assert_eq!(cache.len(), 2);
+        assert_eq!(mru.tail(), Some((&1, &"one")));
 
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert_heap_property(&cache);
+        mru.retain(|&k, _| k != 3);
+
+        assert_eq!(mru.len(), 3);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(!mru.contains_key(&3));
+        assert!(mru.contains_key(&4));
+
+        assert_eq!(mru.tail(), Some((&1, &"one")));
     }
 
     #[test]
-    fn test_mru_cache_interleaved_operations() {
-        let mut cache = Mru::new(NonZeroUsize::new(4).unwrap());
+    fn test_mru_retain_eviction_behavior() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
-        cache.insert(1, 10);
-        cache.insert(2, 20);
-        assert_eq!(cache.get(&1), Some(&10));
-        cache.insert(3, 30);
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
 
-        if let Some(val) = cache.get_mut(&2) {
-            *val = 200;
-        }
+        mru.get(&1);
+        mru.get(&3);
 
-        cache.insert(4, 40);
-        cache.insert(5, 50);
+        mru.retain(|&k, _| k != 4);
 
-        assert_eq!(cache.len(), 4);
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 3);
+        assert!(mru.contains_key(&1));
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&3));
+        assert!(!mru.contains_key(&4));
 
-        cache.retain(|&k, _| k % 2 == 1);
+        assert_eq!(mru.tail(), Some((&3, &"three")));
 
-        let items: Vec<_> = (0..10).map(|i| (i + 10, (i + 10) * 10)).collect();
-        cache.extend(items);
+        mru.insert(5, "five");
+        mru.insert(6, "six");
 
-        assert!(cache.len() <= 4);
-        assert_heap_property(&cache);
+        assert_eq!(mru.len(), 4);
+
+        mru.insert(7, "seven");
+        assert_eq!(mru.len(), 4);
     }
 
     #[test]
-    fn test_mru_heap_corruption_and_heapify() {
-        let mut mru = Mru::<i32, i32>::new(NonZeroUsize::new(7).unwrap());
+    fn test_mru_retain_order_preservation() {
+        let mut mru = Mru::new(NonZeroUsize::new(6).unwrap());
 
-        for i in 0..7 {
+        for i in 1..=6 {
             mru.insert(i, i * 10);
         }
 
-        {
-            let queue = &mut mru.queue;
-            queue[0].priority = 5;
-            queue[2].priority = 999;
-            queue[4].priority = 1;
-        }
+        mru.get(&2);
+        mru.get(&4);
+        mru.get(&6);
 
-        mru.heapify();
+        mru.retain(|&k, _| k % 2 == 0);
 
-        assert_heap_property(&mru);
+        assert_eq!(mru.len(), 3);
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&6));
+
+        assert_eq!(mru.tail(), Some((&6, &60)));
+
+        mru.insert(8, 80);
+        mru.insert(10, 100);
+        mru.insert(12, 120);
+
+        assert_eq!(mru.len(), 6);
+        assert!(mru.contains_key(&2));
+        assert!(mru.contains_key(&4));
+        assert!(mru.contains_key(&6));
+        assert!(mru.contains_key(&8));
+        assert!(mru.contains_key(&10));
+        assert!(mru.contains_key(&12));
     }
 }

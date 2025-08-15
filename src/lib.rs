@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![deny(missing_docs)]
 mod lfu;
 mod lru;
 mod mru;
@@ -21,254 +22,117 @@ type RandomState = std::hash::RandomState;
 #[cfg(feature = "ahash")]
 type RandomState = ahash::RandomState;
 
+/// Private module to implement the sealed trait pattern.
 mod private {
-    use crate::{
-        Entry,
-        lfu::LfuPolicy,
-        lru::LruPolicy,
-        mru::MruPolicy,
-    };
+    /// Sealed trait to prevent external trait implementation.
     pub trait Sealed {}
-    impl Sealed for LruPolicy {}
-    impl Sealed for MruPolicy {}
-    impl Sealed for LfuPolicy {}
-
-    impl<T> Sealed for Entry<T> {}
 }
 
-#[derive(Debug)]
-struct Entry<Value> {
-    priority: u64,
-    value: Value,
+/// Trait for wrapping values in cache entries.
+///
+/// This trait allows policies to associate additional metadata with cached
+/// values while providing uniform access to the underlying data.
+#[doc(hidden)]
+pub trait EntryValue<T>: Sealed {
+    /// Creates a new entry containing the given value.
+    fn new(value: T) -> Self;
+
+    /// Prepares the entry for reinsertion into the cache after being
+    /// temporarily removed and examined.
+    fn prepare_for_reinsert(&mut self);
+
+    /// Converts the entry into its contained value.
+    fn into_value(self) -> T;
+
+    /// Returns a reference to the contained value.
+    fn value(&self) -> &T;
+
+    /// Returns a mutable reference to the contained value.
+    fn value_mut(&mut self) -> &mut T;
 }
 
-pub trait EntryValue: Sealed {
-    fn priority(&self) -> u64;
-    fn priority_mut(&mut self) -> &mut u64;
-}
-
-impl<Value> EntryValue for Entry<Value> {
-    fn priority(&self) -> u64 {
-        self.priority
-    }
-
-    fn priority_mut(&mut self) -> &mut u64 {
-        &mut self.priority
-    }
+/// Trait for cache metadata that tracks eviction state.
+///
+/// This trait provides policy-specific metadata storage and the ability
+/// to identify which entry should be evicted next.
+#[doc(hidden)]
+pub trait Metadata: Default + Sealed {
+    /// Returns the index of the entry that should be evicted next.
+    fn tail_index(&self) -> usize;
 }
 
 /// Trait defining cache eviction policies.
 ///
-/// This trait provides the core interface for implementing different cache
-/// eviction strategies. Each policy determines how entries are prioritized and
-/// which entries should be evicted when the cache reaches capacity.
-///
-/// # Implementation Overview
-///
-/// The policy controls cache behavior through a priority-based system where
-/// each entry has a numeric priority value. The cache maintains these entries
-/// in a heap structure, with the entry at index 0 always being the next
-/// candidate for eviction.
-///
-/// ## Priority Systems
-///
-/// Different policies use different priority assignment strategies:
-///
-/// - **LRU (Least Recently Used)**: Uses descending priorities (u64::MAX →
-///   u64::MIN) where lower values indicate more recent access
-/// - **MRU (Most Recently Used)**: Uses ascending priorities (u64::MIN →
-///   u64::MAX) where higher values indicate more recent access
-/// - **LFU (Least Frequently Used)**: Uses frequency counters starting at 0,
-///   incremented on each access
-///
-/// ## Heap Invariants
-///
-/// The implementation must maintain heap properties:
-/// - **LRU**: Max-heap where parent priority ≥ child priority
-/// - **MRU**: Max-heap where parent priority ≥ child priority
-/// - **LFU**: Min-heap where parent priority ≤ child priority
-///
-/// # Required Methods
-///
-/// Implementers must provide:
-/// 1. **Priority bounds**: `start_value()` and `end_value()`
-/// 2. **Priority assignment**: `assign_update_next_value()`
-/// 3. **Heap maintenance**: `heap_bubble()`
-/// 4. **Overflow handling**: `re_index()`
-///
-/// # Sealed Trait
-///
-/// This trait is sealed and cannot be implemented outside of this crate. The
-/// available implementations are [`LruPolicy`], [`MruPolicy`], and
-/// [`LfuPolicy`].
-///
-/// [`LruPolicy`]: crate::LruPolicy
-/// [`MruPolicy`]: crate::MruPolicy
-/// [`LfuPolicy`]: crate::LfuPolicy
-pub trait Policy: Sealed {
-    /// Returns the initial priority value for new cache entries.
-    ///
-    /// This value is used when the cache is first created and represents
-    /// the starting point of the priority range. Different policies use
-    /// different starting values based on their priority assignment strategy.
-    ///
-    /// # Policy-Specific Values
-    ///
-    /// - **LRU**: `u64::MAX`
-    /// - **MRU**: `u64::MIN`
-    /// - **LFU**: `0` (frequency counter starts at zero)
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use evictor::{
-    ///     LfuPolicy,
-    ///     LruPolicy,
-    ///     MruPolicy,
-    ///     Policy,
-    /// };
-    ///
-    /// assert_eq!(LruPolicy::start_value(), u64::MAX);
-    /// assert_eq!(MruPolicy::start_value(), u64::MIN);
-    /// assert_eq!(LfuPolicy::start_value(), 0);
-    /// ```
-    fn start_value() -> u64;
+/// This trait encapsulates the behavior of different cache eviction strategies
+/// such as LRU, MRU, and LFU. Each policy defines how entries are prioritized
+/// and which entry should be evicted when the cache is full.
+#[doc(hidden)]
+pub trait Policy<T>: Sealed {
+    /// The entry type used by this policy to wrap cached values.
+    type EntryType: EntryValue<T>;
 
-    /// Returns the sentinel value indicating priority range exhaustion.
-    ///
-    /// When the cache's next priority value reaches this sentinel, the cache
-    /// must perform re-indexing to reset the priority range. This prevents
-    /// priority overflow and maintains proper cache ordering.
-    ///
-    /// # Policy-Specific Values
-    ///
-    /// - **LRU**: `u64::MIN` (when countdown reaches minimum)
-    /// - **MRU**: `u64::MAX` (when count-up reaches maximum)
-    /// - **LFU**: `1` (sentinel value, re-indexing not supported)
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use evictor::{
-    ///     LfuPolicy,
-    ///     LruPolicy,
-    ///     MruPolicy,
-    ///     Policy,
-    /// };
-    ///
-    /// assert_eq!(LruPolicy::end_value(), u64::MIN);
-    /// assert_eq!(MruPolicy::end_value(), u64::MAX);
-    /// assert_eq!(LfuPolicy::end_value(), 1);
-    /// ```
-    fn end_value() -> u64;
+    /// The metadata type used by this policy to track eviction state.
+    type MetadataType: Metadata;
 
-    /// Updates an entry's priority and advances the global priority counter.
+    /// Updates the entry's position in the eviction order.
     ///
-    /// This method is called whenever an entry is accessed or inserted. It
-    /// must:
-    /// 1. Assign the current priority to the entry
-    ///
-    /// It **may** also modify the global priority counter (`cache_next`) if
-    /// required for tracking invariants.
-    ///
-    /// The exact behavior depends on the policy's priority strategy.
+    /// This method is called when an entry is accessed (via get, insert, etc.)
+    /// and should update the policy's internal state to reflect the access.
     ///
     /// # Parameters
-    ///
-    /// * `cache_next` - Mutable reference to the cache's global priority
-    ///   counter
-    /// * `entry` - Mutable reference to the cache entry being updated
-    ///
-    /// # Policy Behavior
-    ///
-    /// - **LRU**: Assigns current counter value, then decrements counter
-    /// - **MRU**: Assigns current counter value, then increments counter
-    /// - **LFU**: Increments entry's frequency, ignores global counter
-    fn assign_update_next_value(cache_next: &mut u64, entry: &mut impl EntryValue);
-
-    /// Maintains heap ordering after priority changes.
-    ///
-    /// This method restores the heap invariant after an entry's priority has
-    /// been modified. It may need to bubble the entry up or down in the
-    /// heap depending on the new priority value and the policy's heap type
-    /// (min-heap vs max-heap).
-    ///
-    /// # Parameters
-    ///
-    /// * `index` - The index of the entry that may be out of place
-    /// * `queue` - Mutable reference to the cache's internal storage
+    /// - `index`: The index of the accessed entry
+    /// - `metadata`: Mutable reference to policy metadata
+    /// - `queue`: Mutable reference to the cache's storage
     ///
     /// # Returns
-    ///
-    /// The final index where the entry settled after heap reordering.
-    ///
-    /// # Implementation Requirements
-    ///
-    /// - Must maintain the appropriate heap property for the policy
-    /// - Should be efficient (typically O(log n) complexity)
-    /// - Must handle edge cases (empty queue, single element, etc.)
-    ///
-    /// # Heap Properties by Policy
-    ///
-    /// - **LRU**: Max-heap (parent ≥ children) - recent items bubble down
-    /// - **MRU**: Max-heap (parent ≥ children) - recent items bubble up
-    /// - **LFU**: Min-heap (parent ≤ children) - frequent items bubble down
-    fn heap_bubble<T: EntryValue>(
+    /// The new index of the entry after any reordering
+    fn touch_entry(
         index: usize,
-        queue: &mut IndexMap<impl Hash + Eq, T, RandomState>,
+        metadata: &mut Self::MetadataType,
+        queue: &mut IndexMap<impl Hash + Eq, Self::EntryType, RandomState>,
     ) -> usize;
 
-    /// Reassigns priorities when the global counter reaches overflow.
+    /// Returns an iterator over the removed pairs in insertion order.
+    /// In most cases, this will be the same as the order of removal.
+    /// In certain cases (e.g. MRU), the order may differ.
+    fn iter_removed_pairs_in_insertion_order<K>(
+        pairs: Vec<(K, Self::EntryType)>,
+    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        pairs.into_iter()
+    }
+
+    /// Removes the entry at the specified index and returns the index of the
+    /// entry which replaced it.
     ///
-    /// This method is called when `cache_next` equals `end_value()`, indicating
-    /// that the priority range has been exhausted. The implementation must
-    /// reassign priorities to all entries to prevent overflow while maintaining
-    /// relative ordering.
+    /// This method handles the removal of an entry and updates the policy's
+    /// internal state to maintain consistency.
     ///
     /// # Parameters
+    /// - `index`: The index of the entry to remove
+    /// - `metadata`: Mutable reference to policy metadata
+    /// - `queue`: Mutable reference to the cache's storage
     ///
-    /// * `queue` - Mutable reference to the cache's internal storage
-    /// * `next_priority` - Mutable reference to reset the global priority
-    ///   counter
-    /// * `index` - Starting index for recursive re-indexing (typically 0)
-    ///
-    /// # Implementation Requirements
-    ///
-    /// - Must preserve relative priority ordering
-    /// - Should reset `next_priority` to a valid starting value
-    /// - Must handle empty queues gracefully
-    /// - May use recursive tree traversal for efficiency
-    ///
-    /// # Policy Support
-    ///
-    /// - **LRU**: Supported - resets priorities maintaining recency order
-    /// - **MRU**: Supported - resets priorities maintaining recency order
-    /// - **LFU**: Not supported - panics because frequencies can't be reset.
-    ///   This should be unreachable during normal usage.
-    fn re_index<T: EntryValue>(
-        queue: &mut IndexMap<impl Hash + Eq, T, RandomState>,
-        next_priority: &mut u64,
+    /// # Returns
+    /// A tuple containing:
+    /// - The index that replaced the removed entry (for index map consistency)
+    /// - The removed key-value pair, or None if the index was invalid
+    fn swap_remove_entry<K: Hash + Eq>(
         index: usize,
-    );
+        metadata: &mut Self::MetadataType,
+        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
+    ) -> (usize, Option<(K, Self::EntryType)>);
 }
 
 /// A least-recently-used (LRU) cache.
 ///
-/// The cache maintains at most `capacity` entries. When inserting into a full
-/// cache, the least recently used entry is automatically evicted. All
-/// operations that access values (get, insert, get_or_insert_with) update the
-/// entry's position in the LRU order. Operations that only read without
-/// accessing (peek, contains_key, tail) do not affect LRU ordering.
+/// Evicts the entry that was accessed longest ago when the cache is full.
+/// This policy is ideal for workloads where recently accessed items are
+/// more likely to be accessed again.
 ///
 /// # Time Complexity
-/// - Insert/Get/Remove: O(log n) average, O(n) worst case
+/// - Insert/Get/Remove: O(1) average, O(n) worst case
 /// - Peek/Contains: O(1) average, O(n) worst case
-/// - Pop (oldest): O(log n)
-/// - Clear: O(1)
-///
-/// # Space Complexity
-/// - O(`capacity`) memory usage
-/// - Pre-allocates space for `capacity` entries
+/// - Pop/Clear: O(1)
 ///
 /// # Examples
 ///
@@ -278,45 +142,30 @@ pub trait Policy: Sealed {
 /// use evictor::Lru;
 ///
 /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
-///
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
 ///
-/// assert_eq!(cache.len(), 3);
+/// cache.get(&1); // Mark as recently used
+/// cache.insert(4, "four".to_string()); // Evicts key 2
 ///
-/// cache.get(&1);
-///
-/// cache.insert(4, "four".to_string());
-/// assert!(!cache.contains_key(&2));
-///
-/// cache.peek(&3);
-/// let (oldest_key, _) = cache.tail().unwrap();
-/// assert_eq!(oldest_key, &3);
+/// assert!(cache.contains_key(&1)); // Recently used, kept
+/// assert!(!cache.contains_key(&2)); // Least recently used, evicted
+/// assert!(cache.contains_key(&3));
+/// assert!(cache.contains_key(&4));
 /// ```
 pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 
 /// A most-recently-used (MRU) cache.
 ///
-/// The cache maintains at most `capacity` entries. When inserting into a full
-/// cache, the most recently used entry is automatically evicted. All
-/// operations that access values (get, insert, get_or_insert_with) update the
-/// entry's position in the MRU order. Operations that only read without
-/// accessing (peek, contains_key, tail) do not affect MRU ordering.
+/// Evicts the entry that was accessed most recently when the cache is full.
+/// This policy can be useful for workloads with sequential access patterns
+/// where the most recently accessed item is unlikely to be needed again.
 ///
-/// This is the opposite of LRU behavior - instead of keeping frequently used
-/// items, MRU evicts the items that were just accessed, making it useful for
-/// scenarios where you want to prioritize older, less-accessed items.
-///
-/// # Time Complexity
-/// - Insert/Get/Remove: O(log n) average, O(n) worst case
+/// # Time Complexity  
+/// - Insert/Get/Remove: O(1) average, O(n) worst case
 /// - Peek/Contains: O(1) average, O(n) worst case
-/// - Pop (youngest): O(log n)
-/// - Clear: O(1)
-///
-/// # Space Complexity
-/// - O(`capacity`) memory usage
-/// - Pre-allocates space for `capacity` entries
+/// - Pop/Clear: O(1)
 ///
 /// # Examples
 ///
@@ -326,19 +175,14 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// use evictor::Mru;
 ///
 /// let mut cache = Mru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
-///
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
 ///
-/// assert_eq!(cache.len(), 3);
+/// cache.get(&1); // Mark as recently used
+/// cache.insert(4, "four".to_string()); // Evicts key 1
 ///
-/// // Access key 1, making it most recently used
-/// cache.get(&1);
-///
-/// // Insert new item - this will evict the most recently used (key 1)
-/// cache.insert(4, "four".to_string());
-/// assert!(!cache.contains_key(&1));
+/// assert!(!cache.contains_key(&1)); // Most recently used, evicted
 /// assert!(cache.contains_key(&2));
 /// assert!(cache.contains_key(&3));
 /// assert!(cache.contains_key(&4));
@@ -478,7 +322,7 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 ///
 /// `Cache` is the underlying generic structure that powers LRU, MRU, and LFU
 /// caches. The eviction behavior is determined by the `PolicyType` parameter,
-/// which must implement the [`Policy`] trait.
+/// which must implement the `Policy` trait.
 ///
 /// For most use cases, you should use the type aliases [`Lru`], [`Mru`], or
 /// [`Lfu`] instead of using `Cache` directly.
@@ -489,67 +333,20 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 ///   [`Eq`].
 /// * `Value` - The type of values stored in the cache.
 /// * `PolicyType` - The eviction policy implementation. Must implement
-///   [`Policy`].
-///
-/// # Internal Structure
-///
-/// The cache maintains a priority system where each entry has a numeric
-/// priority that determines its position in the eviction order. The policy
-/// determines how priorities are assigned and updated.
-///
-/// # Heap Invariant
-///
-/// The cache maintains a heap-like structure where:
-/// - For LRU: Lower priority values indicate more recent access
-/// - For MRU: Higher priority values indicate more recent access
-/// - For LFU: Higher priority values indicate more frequent access
-/// - The entry at index 0 is always the next candidate for eviction
+///   `Policy`.
 ///
 /// # Memory Management
 ///
 /// - Pre-allocates space for `capacity` entries to minimize reallocations
 /// - Automatically evicts entries when capacity is exceeded
-/// - Supports shrinking to reduce memory usage when needed
-///
-/// # Examples
-///
-/// ## Using with Custom Policy
-///
-/// ```rust
-/// use std::num::NonZeroUsize;
-///
-/// use evictor::{
-///     Cache,
-///     LruPolicy,
-/// };
-///
-/// // Explicitly using Cache with LruPolicy (equivalent to Lru<i32, String>)
-/// let mut cache: Cache<i32, String, LruPolicy> = Cache::new(NonZeroUsize::new(3).unwrap());
-///
-/// cache.insert(1, "one".to_string());
-/// cache.insert(2, "two".to_string());
-/// assert_eq!(cache.len(), 2);
-/// ```
-///
-/// ## Type Alias Usage (Recommended)
-///
-/// ```rust
-/// use std::num::NonZeroUsize;
-///
-/// use evictor::Lru;
-///
-/// // Preferred way using type alias
-/// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
-/// ```
-#[derive(Debug)]
-pub struct Cache<Key, Value, PolicyType> {
-    queue: IndexMap<Key, Entry<Value>, RandomState>,
+#[derive(Debug, Clone)]
+pub struct Cache<Key, Value, PolicyType: Policy<Value>> {
+    queue: IndexMap<Key, PolicyType::EntryType, RandomState>,
     capacity: NonZeroUsize,
-    next_priority: u64,
-    _policy: std::marker::PhantomData<PolicyType>,
+    metadata: PolicyType::MetadataType,
 }
 
-impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
+impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyType> {
     /// Creates a new, empty cache with the specified capacity.
     ///
     /// The cache will be able to hold at most `capacity` entries. When the
@@ -566,12 +363,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// ```rust
     /// use std::num::NonZeroUsize;
     ///
-    /// use evictor::{
-    ///     Cache,
-    ///     LruPolicy,
-    /// };
+    /// use evictor::Lru;
     ///
-    /// let cache: Cache<i32, String, LruPolicy> = Cache::new(NonZeroUsize::new(100).unwrap());
+    /// let cache: Lru<i32, String> = Lru::new(NonZeroUsize::new(100).unwrap());
     /// assert_eq!(cache.capacity(), 100);
     /// assert!(cache.is_empty());
     /// ```
@@ -579,8 +373,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
         Self {
             queue: IndexMap::with_capacity_and_hasher(capacity.get(), RandomState::default()),
             capacity,
-            next_priority: PolicyType::start_value(),
-            _policy: std::marker::PhantomData,
+            metadata: PolicyType::MetadataType::default(),
         }
     }
 
@@ -607,7 +400,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// ```
     pub fn clear(&mut self) {
         self.queue.clear();
-        self.next_priority = PolicyType::start_value();
+        self.metadata = PolicyType::MetadataType::default();
     }
 
     /// Returns a reference to the value without updating its position in the
@@ -641,7 +434,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// assert_eq!(cache.peek(&2), None);
     /// ```
     pub fn peek(&self, key: &Key) -> Option<&Value> {
-        self.queue.get(key).map(|entry| &entry.value)
+        self.queue.get(key).map(|entry| entry.value())
     }
 
     /// Returns a reference to the entry that would be evicted next.
@@ -677,7 +470,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// assert_eq!(value, &"one".to_string());
     /// ```
     pub fn tail(&self) -> Option<(&Key, &Value)> {
-        self.queue.first().map(|(key, entry)| (key, &entry.value))
+        self.queue
+            .get_index(self.metadata.tail_index())
+            .map(|(key, entry)| (key, entry.value()))
     }
 
     /// Returns true if the cache contains the given key.
@@ -793,36 +588,31 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
         key: Key,
         or_insert: impl FnOnce(&Key) -> Value,
     ) -> &mut Value {
-        if self.next_priority == PolicyType::end_value() {
-            PolicyType::re_index(&mut self.queue, &mut self.next_priority, 0);
-        }
-
         let len = self.queue.len();
-        let index = match self.queue.entry(key) {
+        let mut index = match self.queue.entry(key) {
             indexmap::map::Entry::Occupied(o) => o.index(),
             indexmap::map::Entry::Vacant(v) => {
                 let mut index = v.index();
-                let e = Entry {
-                    priority: self.next_priority,
-                    value: or_insert(v.key()),
-                };
+                let e = PolicyType::EntryType::new(or_insert(v.key()));
                 v.insert(e);
 
                 // Our previous len was at capacity, but we just inserted a new entry.
                 // So we need to remove the oldest entry.
                 if len == self.capacity.get() {
-                    debug_assert_eq!(index, len);
-                    self.queue.swap_remove_index(0);
-                    index = 0;
+                    index = PolicyType::swap_remove_entry(
+                        self.metadata.tail_index(),
+                        &mut self.metadata,
+                        &mut self.queue,
+                    )
+                    .0;
                 }
 
                 index
             }
         };
 
-        PolicyType::assign_update_next_value(&mut self.next_priority, &mut self.queue[index]);
-        let index = PolicyType::heap_bubble(index, &mut self.queue);
-        &mut self.queue[index].value
+        index = PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
+        self.queue[index].value_mut()
     }
 
     /// Inserts a key-value pair into the cache.
@@ -904,30 +694,33 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// assert_eq!(cache.len(), 2);
     /// ```
     pub fn insert_mut(&mut self, key: Key, value: Value) -> &mut Value {
-        if self.next_priority == PolicyType::end_value() {
-            PolicyType::re_index(&mut self.queue, &mut self.next_priority, 0);
-        }
+        let len = self.queue.len();
+        let mut index = match self.queue.entry(key) {
+            indexmap::map::Entry::Occupied(mut o) => {
+                *o.get_mut().value_mut() = value;
+                o.index()
+            }
+            indexmap::map::Entry::Vacant(v) => {
+                let mut index = v.index();
+                v.insert(PolicyType::EntryType::new(value));
 
-        let mut index = self
-            .queue
-            .insert_full(
-                key,
-                Entry {
-                    priority: self.next_priority,
-                    value,
-                },
-            )
-            .0;
+                // Our previous len was at capacity, but we just inserted a new entry.
+                // So we need to remove the oldest entry.
+                if len == self.capacity.get() {
+                    index = PolicyType::swap_remove_entry(
+                        self.metadata.tail_index(),
+                        &mut self.metadata,
+                        &mut self.queue,
+                    )
+                    .0;
+                }
 
-        PolicyType::assign_update_next_value(&mut self.next_priority, &mut self.queue[index]);
-        if self.queue.len() > self.capacity.get() {
-            debug_assert_eq!(index, self.queue.len() - 1);
-            self.queue.swap_remove_index(0);
-            index = 0;
-        }
+                index
+            }
+        };
 
-        let index = PolicyType::heap_bubble(index, &mut self.queue);
-        &mut self.queue[index].value
+        index = PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
+        self.queue[index].value_mut()
     }
 
     /// Gets a value from the cache, marking it as recently used.
@@ -1001,15 +794,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// assert_eq!(cache.get_mut(&3), None);
     /// ```
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
-        if self.next_priority == PolicyType::end_value() {
-            PolicyType::re_index(&mut self.queue, &mut self.next_priority, 0);
-        }
-
-        if let Some(mut index) = self.queue.get_index_of(key) {
-            PolicyType::assign_update_next_value(&mut self.next_priority, &mut self.queue[index]);
-            index = PolicyType::heap_bubble(index, &mut self.queue);
-
-            Some(&mut self.queue[index].value)
+        if let Some(index) = self.queue.get_index_of(key) {
+            let index = PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
+            Some(self.queue[index].value_mut())
         } else {
             None
         }
@@ -1046,7 +833,13 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// assert_eq!(cache.len(), 1);
     /// ```
     pub fn pop(&mut self) -> Option<(Key, Value)> {
-        self.pop_internal().map(|(key, entry)| (key, entry.value))
+        PolicyType::swap_remove_entry(
+            self.metadata.tail_index(),
+            &mut self.metadata,
+            &mut self.queue,
+        )
+        .1
+        .map(|(key, entry)| (key, entry.into_value()))
     }
 
     /// Removes a specific entry from the cache.
@@ -1081,11 +874,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
     /// ```
     pub fn remove(&mut self, key: &Key) -> Option<Value> {
         if let Some(index) = self.queue.get_index_of(key) {
-            let entry = self.queue.swap_remove_index(index);
-            if index < self.queue.len() {
-                PolicyType::heap_bubble(index, &mut self.queue);
-            }
-            entry.map(|(_, entry)| entry.value)
+            PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue)
+                .1
+                .map(|(_, entry)| entry.into_value())
         } else {
             None
         }
@@ -1150,13 +941,28 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
         self.capacity.get()
     }
 
-    /// Retains only the entries for which the predicate returns true.
-    pub fn retain(&mut self, mut f: impl FnMut(&Key, &mut Value) -> bool) {
-        self.queue.retain(|key, entry| f(key, &mut entry.value));
-        self.heapify();
-    }
-
     /// Extends the cache with key-value pairs from an iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+    ///
+    /// cache.insert(1, "one".to_string());
+    /// cache.insert(2, "two".to_string());
+    ///
+    /// let items = vec![(3, "three".to_string()), (4, "four".to_string())];
+    /// cache.extend(items);
+    ///
+    /// assert_eq!(cache.len(), 3);
+    /// assert_eq!(cache.peek(&2), Some(&"two".to_string()));
+    /// assert_eq!(cache.peek(&3), Some(&"three".to_string()));
+    /// assert_eq!(cache.peek(&4), Some(&"four".to_string()));
+    /// ```
     pub fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = (Key, Value)>,
@@ -1166,64 +972,126 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy> Cache<Key, Value, PolicyType> {
         }
     }
 
+    /// TODO
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&Key, &mut Value) -> bool,
+    {
+        let mut kvs = Vec::with_capacity(self.queue.len());
+        while let Some((key, mut entry)) = PolicyType::swap_remove_entry(
+            self.metadata.tail_index(),
+            &mut self.metadata,
+            &mut self.queue,
+        )
+        .1
+        {
+            if f(&key, entry.value_mut()) {
+                entry.prepare_for_reinsert();
+                kvs.push((key, entry));
+            }
+        }
+
+        self.metadata = PolicyType::MetadataType::default();
+        for (key, entry) in PolicyType::iter_removed_pairs_in_insertion_order(kvs) {
+            self.queue.insert(key, entry);
+            PolicyType::touch_entry(self.queue.len() - 1, &mut self.metadata, &mut self.queue);
+        }
+    }
+
     /// Shrinks the internal storage to fit the current number of entries.
     pub fn shrink_to_fit(&mut self) {
         self.queue.shrink_to_fit();
     }
-
-    fn pop_internal(&mut self) -> Option<(Key, Entry<Value>)> {
-        if self.queue.is_empty() {
-            return None;
-        }
-
-        let result = self.queue.swap_remove_index(0);
-        PolicyType::heap_bubble(0, &mut self.queue);
-        result
-    }
-
-    fn heapify(&mut self) {
-        if self.queue.is_empty() {
-            return;
-        }
-
-        for i in (0..self.queue.len() / 2).rev() {
-            PolicyType::heap_bubble(i, &mut self.queue);
-        }
-    }
 }
 
-impl<Key: Hash + Eq, Value, PolicyType: Policy> std::iter::FromIterator<(Key, Value)>
+impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(Key, Value)>
     for Cache<Key, Value, PolicyType>
 {
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = (Key, Value)>,
     {
-        let mut queue: IndexMap<Key, Entry<Value>, ahash::RandomState> =
+        let mut queue: IndexMap<Key, PolicyType::EntryType, ahash::RandomState> =
             IndexMap::with_hasher(RandomState::default());
-        let mut priority = PolicyType::start_value();
+        let mut metadata = PolicyType::MetadataType::default();
 
         for (key, value) in iter {
             match queue.entry(key) {
                 indexmap::map::Entry::Occupied(mut o) => {
-                    o.get_mut().value = value;
-                    PolicyType::assign_update_next_value(&mut priority, o.get_mut());
+                    *o.get_mut().value_mut() = value;
+                    PolicyType::touch_entry(o.index(), &mut metadata, &mut queue);
                 }
                 indexmap::map::Entry::Vacant(v) => {
-                    let entry = v.insert(Entry { priority, value });
-                    PolicyType::assign_update_next_value(&mut priority, entry);
+                    let index = v.index();
+                    v.insert(PolicyType::EntryType::new(value));
+                    PolicyType::touch_entry(index, &mut metadata, &mut queue);
                 }
             }
         }
 
         let capacity = NonZeroUsize::new(queue.len().max(1)).unwrap();
-        let mut lru = Self {
+        Self {
             queue,
             capacity,
-            next_priority: priority,
-            _policy: std::marker::PhantomData,
+            metadata,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_lru_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            LruPolicy,
         };
-        lru.heapify();
-        lru
+
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_heap_lfu_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            LfuPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, LfuPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_mru_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            MruPolicy,
+        };
+        let mut cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
     }
 }
