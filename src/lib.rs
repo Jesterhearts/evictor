@@ -22,8 +22,8 @@ pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
 pub use queue::{
-    FiFoPolicy,
-    LiFoPolicy,
+    FIFOPolicy,
+    LIFOPolicy,
 };
 #[cfg(feature = "rand")]
 pub use random::RandomPolicy;
@@ -367,9 +367,9 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 /// ```
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::FiFo;
+/// use evictor::FIFO;
 ///
-/// let mut cache = FiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = FIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
@@ -387,7 +387,7 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 ///     ]
 /// );
 /// ```
-pub type FiFo<Key, Value> = Cache<Key, Value, FiFoPolicy>;
+pub type FIFO<Key, Value> = Cache<Key, Value, FIFOPolicy>;
 
 /// A last-in-first-out (LIFO) cache.
 ///
@@ -405,9 +405,9 @@ pub type FiFo<Key, Value> = Cache<Key, Value, FiFoPolicy>;
 /// ```
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::LiFo;
+/// use evictor::LIFO;
 ///
-/// let mut cache = LiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = LIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
@@ -425,7 +425,7 @@ pub type FiFo<Key, Value> = Cache<Key, Value, FiFoPolicy>;
 ///     ]
 /// );
 /// ```
-pub type LiFo<Key, Value> = Cache<Key, Value, LiFoPolicy>;
+pub type LIFO<Key, Value> = Cache<Key, Value, LIFOPolicy>;
 
 /// A random eviction cache.
 ///
@@ -474,7 +474,7 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// `PolicyType` parameter, which must implement the `Policy` trait.
 ///
 /// For most use cases, you should use the type aliases [`Lru`], [`Mru`],
-/// [`Lfu`], [`FiFo`], [`LiFo`], or [`Random`] instead of using `Cache`
+/// [`Lfu`], [`FIFO`], [`LIFO`], or [`Random`] instead of using `Cache`
 /// directly.
 ///
 /// # Type Parameters

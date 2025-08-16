@@ -89,6 +89,13 @@ impl<T> Policy<T> for LfuPolicy {
             return index;
         }
 
+        // I.e. if you've been running this cache for hundreds of years (~600 years
+        // worth of nanonseconds in a u64), don't do anything to re-order the
+        // entry. Honestly, this might even use unreachable.
+        if queue[index].frequency == u64::MAX {
+            return index;
+        }
+
         let removed = unlink_node(index, metadata, queue);
         debug_assert!(
             removed
@@ -116,7 +123,7 @@ impl<T> Policy<T> for LfuPolicy {
         }));
 
         let old_frequency = queue[index].frequency;
-        queue[index].frequency = queue[index].frequency.saturating_add(1);
+        queue[index].frequency += 1;
 
         link_node(
             index,

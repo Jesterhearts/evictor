@@ -98,9 +98,9 @@ Evicts the item that was inserted earliest, regardless of access patterns:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::FiFo;
+use evictor::FIFO;
 
-let mut cache = FiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+let mut cache = FIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
 cache.insert(1, "one".to_string());
 cache.insert(2, "two".to_string());
@@ -122,9 +122,9 @@ Evicts the item that was inserted most recently, regardless of access patterns:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::LiFo;
+use evictor::LIFO;
 
-let mut cache = LiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+let mut cache = LIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
 cache.insert(1, "one".to_string());
 cache.insert(2, "two".to_string());
@@ -171,7 +171,7 @@ All cache types can be created from iterators. This will set the capacity to the
 the iterator:
 
 ```rust
-use evictor::{Lru, Mru, Lfu, FiFo, LiFo, Random};
+use evictor::{Lru, Mru, Lfu, FIFO, LIFO, Random};
 
 let items = vec![
     (1, "one".to_string()),
@@ -183,8 +183,8 @@ let items = vec![
 let lru_cache: Lru<i32, String> = items.clone().into_iter().collect();
 let mru_cache: Mru<i32, String> = items.clone().into_iter().collect();
 let lfu_cache: Lfu<i32, String> = items.clone().into_iter().collect();
-let fifo_cache: FiFo<i32, String> = items.clone().into_iter().collect();
-let lifo_cache: LiFo<i32, String> = items.clone().into_iter().collect();
+let fifo_cache: FIFO<i32, String> = items.clone().into_iter().collect();
+let lifo_cache: LIFO<i32, String> = items.clone().into_iter().collect();
 let random_cache: Random<i32, String> = items.into_iter().collect();
 ```
 
@@ -194,7 +194,7 @@ All cache types support the same operations with identical APIs:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::Lru; // Could also use Mru, Lfu, FiFo, LiFo, or Random
+use evictor::Lru; // Could also use Mru, Lfu, FIFO, LIFO, or Random
 
 let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 

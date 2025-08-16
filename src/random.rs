@@ -50,7 +50,7 @@ impl private::Sealed for RandomMetadata {}
 
 impl Metadata for RandomMetadata {
     fn tail_index(&self) -> usize {
-        rand::random::<u64>() as usize % self.num_entries
+        rand::random_range(0..self.num_entries.max(1))
     }
 }
 
@@ -92,9 +92,12 @@ impl<T> Policy<T> for RandomPolicy {
 
         Iter {
             #[cfg(debug_assertions)]
+            index: order.pop().unwrap_or(queue.len()),
+            #[cfg(not(debug_assertions))]
+            index: 0,
+            #[cfg(debug_assertions)]
             order,
             queue,
-            index: 0,
         }
     }
 
@@ -109,9 +112,12 @@ impl<T> Policy<T> for RandomPolicy {
 
         IntoIter {
             #[cfg(debug_assertions)]
+            index: order.pop().unwrap_or(queue.len()),
+            #[cfg(not(debug_assertions))]
+            index: 0,
+            #[cfg(debug_assertions)]
             order,
             queue: queue.into_iter().map(Some).collect(),
-            index: 0,
         }
     }
 
@@ -126,9 +132,12 @@ impl<T> Policy<T> for RandomPolicy {
 
         IntoEntriesIter {
             #[cfg(debug_assertions)]
+            index: order.pop().unwrap_or(queue.len()),
+            #[cfg(not(debug_assertions))]
+            index: 0,
+            #[cfg(debug_assertions)]
             order,
             queue: queue.into_iter().map(Some).collect(),
-            index: 0,
         }
     }
 }
@@ -216,5 +225,27 @@ impl<K, T> Iterator for IntoEntriesIter<K, T> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use crate::Random;
+
+    #[test]
+    fn test_random_empty_cache() {
+        let mut cache = Random::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.capacity(), 3);
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.peek(&1), None);
+        assert_eq!(cache.remove(&1), None);
+        assert_eq!(cache.pop(), None);
+        assert!(cache.tail().is_none());
+        assert!(!cache.contains_key(&1));
     }
 }
