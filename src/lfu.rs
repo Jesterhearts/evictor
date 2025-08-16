@@ -90,6 +90,30 @@ impl<T> Policy<T> for LfuPolicy {
         }
 
         let removed = unlink_node(index, metadata, queue);
+        debug_assert!(
+            removed
+                .as_ref()
+                .is_none_or(|removed| removed.head == removed.tail && removed.head == index)
+        );
+        debug_assert!(
+            metadata
+                .frequency_head_tail
+                .get_index(metadata.head_bucket)
+                .is_none_or(|(_, bucket)| bucket.prev_bucket.is_none())
+        );
+        debug_assert!(removed.as_ref().is_none_or(|removed| {
+            removed.prev_bucket.is_none_or(|prev| {
+                metadata
+                    .frequency_head_tail
+                    .get_index(prev)
+                    .is_some_and(|(freq, _)| *freq < queue[index].frequency)
+            }) && removed.next_bucket.is_none_or(|next| {
+                metadata
+                    .frequency_head_tail
+                    .get_index(next)
+                    .is_some_and(|(freq, _)| *freq > queue[index].frequency)
+            })
+        }));
 
         let old_frequency = queue[index].frequency;
         queue[index].frequency = queue[index].frequency.saturating_add(1);
@@ -101,6 +125,25 @@ impl<T> Policy<T> for LfuPolicy {
             removed,
             metadata,
             queue,
+        );
+        debug_assert!(
+            metadata
+                .frequency_head_tail
+                .get_index(metadata.head_bucket)
+                .is_none_or(|(_, bucket)| bucket.prev_bucket.is_none())
+        );
+        debug_assert!(
+            metadata
+                .frequency_head_tail
+                .get_index(metadata.head_bucket)
+                .is_some_and(|(head_freq, bucket)| {
+                    bucket.next_bucket.is_none_or(|next| {
+                        metadata
+                            .frequency_head_tail
+                            .get_index(next)
+                            .is_some_and(|(freq, _)| *freq > *head_freq)
+                    })
+                })
         );
 
         index
