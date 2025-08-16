@@ -41,29 +41,118 @@ mod private {
 /// Trait for wrapping values in cache entries.
 ///
 /// This trait allows policies to associate additional metadata with cached
-/// values while providing uniform access to the underlying data.
+/// values while providing uniform access to the underlying data. Different
+/// eviction policies may store additional information alongside the cached
+/// value (such as access frequency for LFU or access timestamps).
+///
+/// # Type Parameters
+///
+/// * `T` - The type of the cached value being wrapped
+///
+/// # Design Notes
+///
+/// This trait abstracts over the storage requirements of different eviction
+/// policies. Some policies like LRU only need to store the value itself,
+/// while others like LFU need to track additional metadata such as access
+/// frequency counts. By using this trait, the cache implementation can
+/// remain generic over different storage strategies.
 #[doc(hidden)]
 pub trait EntryValue<T>: private::Sealed {
     /// Creates a new entry containing the given value.
+    ///
+    /// This method should initialize any policy-specific metadata to
+    /// appropriate default values. For example, an LFU policy might
+    /// initialize access counts to zero, while an LRU policy might not need
+    /// any additional initialization.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to be stored in the cache entry
     fn new(value: T) -> Self;
 
     /// Converts the entry into its contained value.
+    ///
+    /// This method consumes the entry and extracts the wrapped value,
+    /// discarding any policy-specific metadata. This is typically used
+    /// when an entry is being removed from the cache.
     fn into_value(self) -> T;
 
     /// Returns a reference to the contained value.
+    ///
+    /// This method provides read-only access to the cached value without
+    /// affecting any policy-specific metadata or consuming the entry.
     fn value(&self) -> &T;
 
     /// Returns a mutable reference to the contained value.
+    ///
+    /// This method provides write access to the cached value. The policy
+    /// may or may not update its metadata when this method is called,
+    /// depending on the specific implementation requirements.
     fn value_mut(&mut self) -> &mut T;
 }
 
 /// Trait for cache metadata that tracks eviction state.
 ///
 /// This trait provides policy-specific metadata storage and the ability
-/// to identify which entry should be evicted next.
+/// to identify which entry should be evicted next. Different eviction
+/// policies maintain different types of metadata to efficiently determine
+/// eviction order.
+///
+/// # Design Philosophy
+///
+/// The metadata abstraction allows each eviction policy to maintain its
+/// own internal state without exposing implementation details to the
+/// generic cache structure. This enables efficient O(1) eviction decisions
+/// across all supported policies.
+///
+/// # Metadata Examples by Policy
+///
+/// - **LRU/MRU**: Typically maintains a doubly-linked list order via indices
+/// - **LFU**: May track frequency buckets and least-used indices
+/// - **FIFO/LIFO**: Often just tracks head/tail pointers for queue ordering
+/// - **Random**: May maintain no additional state or seed information
+///
+/// # Default Implementation
+///
+/// The `Default` trait bound ensures that metadata can be easily initialized
+/// when creating a new cache. The default state should represent an empty
+/// cache with no entries.
 #[doc(hidden)]
 pub trait Metadata: Default + private::Sealed {
     /// Returns the index of the entry that should be evicted next.
+    ///
+    /// This method provides the core eviction logic by identifying which
+    /// entry in the cache should be removed when space is needed. The
+    /// returned index corresponds to a position in the cache's internal
+    /// storage (typically an `IndexMap`).
+    ///
+    /// # Returns
+    ///
+    /// The index of the entry that would be evicted next according to
+    /// this policy's eviction strategy. For an empty cache, this method's
+    /// behavior is undefined and should not be called.
+    ///
+    /// # Performance
+    ///
+    /// This method must have O(1) time complexity to maintain the cache's
+    /// performance guarantees. Implementations should pre-compute or
+    /// efficiently track the tail index rather than scanning entries.
+    ///
+    /// # Policy-Specific Behavior
+    ///
+    /// - **LRU**: Returns index of least recently used entry
+    /// - **MRU**: Returns index of most recently used entry
+    /// - **LFU**: Returns index of least frequently used entry
+    /// - **FIFO**: Returns index of first inserted entry
+    /// - **LIFO**: Returns index of last inserted entry
+    /// - **Random**: Returns index of randomly selected entry
+    ///
+    /// # Usage
+    ///
+    /// This method is typically called by the cache implementation when:
+    /// - The cache is at capacity and a new entry needs to be inserted
+    /// - The `pop()` method is called to explicitly remove the tail entry
+    /// - The `tail()` method is called to inspect the next eviction candidate
     fn tail_index(&self) -> usize;
 }
 
@@ -73,6 +162,52 @@ pub trait Metadata: Default + private::Sealed {
 /// such as LRU, MRU, LFU, FIFO, LIFO, and Random. Each policy defines how
 /// entries are prioritized and which entry should be evicted when the cache is
 /// full.
+///
+/// # Type Parameters
+///
+/// * `T` - The type of values stored in the cache
+///
+/// # Associated Types
+///
+/// This trait defines three associated types that work together:
+/// - `EntryType`: Wraps cached values with policy-specific metadata
+/// - `MetadataType`: Maintains global policy state for eviction decisions
+/// - `IntoIter`: Provides owned iteration over cache contents in eviction order
+///
+/// # Policy Implementations
+///
+/// The crate provides several built-in policy implementations:
+///
+/// ## Recency-Based Policies
+/// - **LRU (Least Recently Used)**: Evicts entries that haven't been accessed
+///   recently
+/// - **MRU (Most Recently Used)**: Evicts entries that were accessed most
+///   recently
+///
+/// ## Frequency-Based Policies  
+/// - **LFU (Least Frequently Used)**: Evicts entries with the lowest access
+///   count
+///
+/// ## Insertion-Order Policies
+/// - **FIFO (First In, First Out)**: Evicts entries in insertion order
+/// - **LIFO (Last In, First Out)**: Evicts entries in reverse insertion order
+///
+/// ## Randomized Policies
+/// - **Random**: Evicts entries randomly
+///
+/// # Error Handling
+///
+/// Policy implementations should handle edge cases gracefully:
+/// - Empty caches (no entries to evict)
+/// - Single-entry caches
+/// - Invalid indices (though these should not occur in normal operation)
+///
+/// # Iteration Order Consistency
+///
+/// The `iter()` and `into_iter()` methods must return entries in eviction
+/// order, meaning the first item returned should be the same as what `tail()`
+/// would return (except for policies where the order is specified as
+/// arbitrary e.g. [`Random`]).
 #[doc(hidden)]
 pub trait Policy<T>: private::Sealed {
     /// The entry type used by this policy to wrap cached values.
@@ -139,7 +274,7 @@ pub trait Policy<T>: private::Sealed {
     ///   with ties broken by insertion/access order
     /// - **FIFO**: Iterates from first inserted to last inserted
     /// - **LIFO**: Iterates from last inserted to first inserted
-    /// - **Random**: Iterates in random order (debug) or insertion order
+    /// - **Random**: Iterates in random order (debug) or arbitrary order
     ///   (release)
     ///
     /// This is an internal trait method used by policy implementations.
@@ -184,41 +319,38 @@ pub trait Policy<T>: private::Sealed {
     /// An iterator that yields `(K, T)` pairs in the policy-specific eviction
     /// order. The iterator takes ownership of the cache contents, making
     /// this a consuming operation.
-    ///
-    /// # Examples
-    /// ```rust
-    /// use std::num::NonZeroUsize;
-    ///
-    /// use evictor::{
-    ///     Cache,
-    ///     Lru,
-    /// };
-    ///
-    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
-    /// cache.insert("a", 1);
-    /// cache.insert("b", 2);
-    /// cache.insert("c", 3);
-    ///
-    /// // For LRU, iteration goes from least recently used to most recently used
-    /// let pairs: Vec<_> = cache.into_iter().collect();
-    /// assert_eq!(pairs, vec![("a", 1), ("b", 2), ("c", 3)]);
-    /// ```
-    ///
-    /// # Performance
-    /// - Time complexity: O(n) where n is the number of cached items
-    /// - Space complexity: O(n) for the iterator state
-    ///
-    /// # Note
-    /// This method is typically called indirectly through the standard
-    /// library's `IntoIterator` trait implementation on `Cache<K, V,
-    /// PolicyType>`.
     fn into_iter<K>(
         metadata: Self::MetadataType,
         queue: IndexMap<K, Self::EntryType, RandomState>,
     ) -> Self::IntoIter<K>;
 
-    /// Converts the cache entries into an iterator of key-value pairs in
+    /// Converts the cache entries into an iterator of key-entry pairs in
     /// eviction order.
+    ///
+    /// This method is similar to `into_iter()` but returns the full entry
+    /// wrappers instead of just the values. This allows access to any
+    /// policy-specific metadata stored within the entries, which can be
+    /// useful for debugging, analysis, or advanced cache operations.
+    ///
+    /// # Parameters
+    ///
+    /// * `metadata` - The policy's metadata containing eviction state
+    ///   information
+    /// * `queue` - The cache's internal storage map containing all key-entry
+    ///   pairs
+    ///
+    /// # Returns
+    ///
+    /// An iterator that yields `(K, Self::EntryType)` pairs in the
+    /// policy-specific eviction order. The iterator consumes the cache
+    /// contents.
+    ///
+    /// # Use Cases
+    ///
+    /// This method is primarily used for internal implementation details where
+    /// entry metadata is needed
+    ///
+    /// For typical usage, prefer `into_iter()` which extracts just the values.
     fn into_entries<K>(
         metadata: Self::MetadataType,
         queue: IndexMap<K, Self::EntryType, RandomState>,
