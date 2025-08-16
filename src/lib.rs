@@ -1069,41 +1069,6 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         self.capacity.get()
     }
 
-    /// Extends the cache with key-value pairs from an iterator.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use std::num::NonZeroUsize;
-    ///
-    /// use evictor::Lru;
-    ///
-    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
-    ///
-    /// cache.insert(1, "one".to_string());
-    /// cache.insert(2, "two".to_string());
-    ///
-    /// let items = vec![(3, "three".to_string()), (4, "four".to_string())];
-    /// cache.extend(items);
-    ///
-    /// assert_eq!(
-    ///     cache.into_iter().collect::<Vec<_>>(),
-    ///     [
-    ///         (2, "two".to_string()),
-    ///         (3, "three".to_string()),
-    ///         (4, "four".to_string()),
-    ///     ]
-    /// );
-    /// ```
-    pub fn extend<I>(&mut self, iter: I)
-    where
-        I: IntoIterator<Item = (Key, Value)>,
-    {
-        for (key, value) in iter {
-            self.insert(key, value);
-        }
-    }
-
     /// Returns an iterator over cache entries in eviction order.
     ///
     /// The iterator yields key-value pairs `(&Key, &Value)` in the order they
@@ -1375,6 +1340,38 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
             queue,
             capacity,
             metadata,
+        }
+    }
+}
+
+impl<K: Hash + Eq, V, PolicyType: Policy<V>> Extend<(K, V)> for Cache<K, V, PolicyType> {
+    /// Extends the cache with key-value pairs from an iterator.
+    ///
+    /// This method consumes the iterator and inserts each `(Key, Value)` pair
+    /// into the cache. If the cache is at capacity, the policy determines which
+    /// entry is evicted to make room for new entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - An iterator of `(Key, Value)` pairs to insert into the cache
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+    /// cache.extend(vec![(1, "one".to_string()), (2, "two".to_string())]);
+    /// assert_eq!(cache.len(), 2);
+    /// ```
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        for (key, value) in iter {
+            self.insert(key, value);
         }
     }
 }
