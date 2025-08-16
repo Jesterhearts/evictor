@@ -9,6 +9,8 @@ Provides several cache implementations with different eviction policies:
 - **LRU (Least Recently Used)** - Evicts the item that was accessed longest ago
 - **MRU (Most Recently Used)** - Evicts the item that was accessed most recently  
 - **LFU (Least Frequently Used)** - Evicts the item that has been accessed least frequently
+- **FIFO (First In, First Out)** - Evicts the item that was inserted earliest, regardless of access patterns
+- **LIFO (Last In, First Out)** - Evicts the item that was inserted most recently, regardless of access patterns
 
 All caches are generic over key and value types, with a configurable capacity. 
 
@@ -87,12 +89,60 @@ assert!(cache.contains_key(&1));  // 1 has highest frequency (2)
 assert!(cache.contains_key(&2));  // 2 has frequency 1
 ```
 
+### FIFO (First In, First Out) Cache
+
+Evicts the item that was inserted earliest, regardless of access patterns:
+
+```rust
+use std::num::NonZeroUsize;
+use evictor::FiFo;
+
+let mut cache = FiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+
+cache.insert(1, "one".to_string());
+cache.insert(2, "two".to_string());
+cache.insert(3, "three".to_string());
+
+// Access entry (doesn't affect eviction order in FIFO)
+cache.get(&1);
+
+// Insert when full evicts first inserted
+cache.insert(4, "four".to_string());
+assert!(!cache.contains_key(&1)); // 1 was evicted (first inserted)
+assert!(cache.contains_key(&2));  // 2 was inserted second, so kept
+assert!(cache.contains_key(&3));  // 3 was inserted third, so kept
+```
+
+### LIFO (Last In, First Out) Cache
+
+Evicts the item that was inserted most recently, regardless of access patterns:
+
+```rust
+use std::num::NonZeroUsize;
+use evictor::LiFo;
+
+let mut cache = LiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+
+cache.insert(1, "one".to_string());
+cache.insert(2, "two".to_string());
+cache.insert(3, "three".to_string());
+
+// Access entry (doesn't affect eviction order in LIFO)
+cache.get(&1);
+
+// Insert when full evicts most recently inserted
+cache.insert(4, "four".to_string());
+assert!(!cache.contains_key(&3)); // 3 was evicted (most recently inserted)
+assert!(cache.contains_key(&1));  // 1 was inserted first, so kept
+assert!(cache.contains_key(&2));  // 2 was inserted second, so kept
+```
+
 ### Creating from Iterator
 
 All cache types can be created from iterators. This will set the capacity to the number of items in the iterator:
 
 ```rust
-use evictor::{Lru, Mru, Lfu};
+use evictor::{Lru, Mru, Lfu, FiFo, LiFo};
 
 let items = vec![
     (1, "one".to_string()),
@@ -103,7 +153,9 @@ let items = vec![
 // Works with any cache type
 let lru_cache: Lru<i32, String> = items.clone().into_iter().collect();
 let mru_cache: Mru<i32, String> = items.clone().into_iter().collect();
-let lfu_cache: Lfu<i32, String> = items.into_iter().collect();
+let lfu_cache: Lfu<i32, String> = items.clone().into_iter().collect();
+let fifo_cache: FiFo<i32, String> = items.clone().into_iter().collect();
+let lifo_cache: LiFo<i32, String> = items.into_iter().collect();
 ```
 
 ### Common Operations
@@ -112,7 +164,7 @@ All cache types support the same operations with identical APIs:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::Lru; // Could also use Mru or Lfu
+use evictor::Lru; // Could also use Mru, Lfu, FiFo, or LiFo
 
 let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 

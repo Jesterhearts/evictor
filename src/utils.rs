@@ -90,3 +90,67 @@ macro_rules! swap_remove_ll_entry {
 }
 
 pub(crate) use swap_remove_ll_entry;
+
+macro_rules! impl_ll_iters {
+    ($entry_t:ident) => {
+        struct Iter<'q, K, T> {
+            queue: &'q indexmap::IndexMap<K, $entry_t<T>, crate::RandomState>,
+            index: Option<usize>,
+        }
+
+        impl<'q, K, T> Iterator for Iter<'q, K, T> {
+            type Item = (&'q K, &'q T);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if let Some(index) = self.index {
+                    let (key, entry) = self.queue.get_index(index)?;
+                    self.index = entry.next;
+                    Some((key, entry.value()))
+                } else {
+                    None
+                }
+            }
+        }
+
+        #[doc(hidden)]
+        pub struct IntoIter<K, T> {
+            queue: Vec<Option<(K, $entry_t<T>)>>,
+            index: Option<usize>,
+        }
+
+        impl<K, T> Iterator for IntoIter<K, T> {
+            type Item = (K, T);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if let Some(index) = self.index {
+                    let (key, entry) = self.queue.get_mut(index)?.take()?;
+                    self.index = entry.next;
+                    Some((key, entry.into_value()))
+                } else {
+                    None
+                }
+            }
+        }
+
+        struct IntoEntriesIter<K, T> {
+            queue: Vec<Option<(K, $entry_t<T>)>>,
+            index: Option<usize>,
+        }
+
+        impl<K, T> Iterator for IntoEntriesIter<K, T> {
+            type Item = (K, $entry_t<T>);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if let Some(index) = self.index {
+                    let (key, entry) = self.queue.get_mut(index)?.take()?;
+                    self.index = entry.next;
+                    Some((key, entry))
+                } else {
+                    None
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use impl_ll_iters;

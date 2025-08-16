@@ -3,6 +3,7 @@
 mod lfu;
 mod lru;
 mod mru;
+mod queue;
 mod r#ref;
 mod utils;
 
@@ -16,9 +17,11 @@ use indexmap::IndexMap;
 pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
+pub use queue::{
+    FiFoPolicy,
+    LiFoPolicy,
+};
 pub use r#ref::Entry;
-
-use crate::private::Sealed;
 
 #[cfg(not(feature = "ahash"))]
 type RandomState = std::hash::RandomState;
@@ -34,7 +37,7 @@ mod private {
 /// This trait allows policies to associate additional metadata with cached
 /// values while providing uniform access to the underlying data.
 #[doc(hidden)]
-pub trait EntryValue<T>: Sealed {
+pub trait EntryValue<T>: private::Sealed {
     /// Creates a new entry containing the given value.
     fn new(value: T) -> Self;
 
@@ -53,7 +56,7 @@ pub trait EntryValue<T>: Sealed {
 /// This trait provides policy-specific metadata storage and the ability
 /// to identify which entry should be evicted next.
 #[doc(hidden)]
-pub trait Metadata: Default + Sealed {
+pub trait Metadata: Default + private::Sealed {
     /// Returns the index of the entry that should be evicted next.
     fn tail_index(&self) -> usize;
 }
@@ -64,7 +67,7 @@ pub trait Metadata: Default + Sealed {
 /// such as LRU, MRU, and LFU. Each policy defines how entries are prioritized
 /// and which entry should be evicted when the cache is full.
 #[doc(hidden)]
-pub trait Policy<T>: Sealed {
+pub trait Policy<T>: private::Sealed {
     /// The entry type used by this policy to wrap cached values.
     type EntryType: EntryValue<T>;
 
@@ -333,6 +336,82 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// );
 /// ```
 pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
+
+/// A first-in-first-out (FIFO) cache.
+///
+/// Evicts the entry that was inserted earliest when the cache is full.
+/// This policy treats the cache as a queue where the oldest inserted
+/// item is removed first, regardless of access patterns.
+///
+/// # Time Complexity
+/// - Insert/Get/Remove: O(1) average, O(n) worst case
+/// - Peek/Contains: O(1) average, O(n) worst case
+/// - Pop/Clear: O(1)
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::FiFo;
+///
+/// let mut cache = FiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// cache.insert(1, "one".to_string());
+/// cache.insert(2, "two".to_string());
+/// cache.insert(3, "three".to_string());
+///
+/// cache.get(&1); // Access key 1 - this doesn't affect eviction order in FIFO
+/// cache.insert(4, "four".to_string()); // Evicts key 1 (first inserted)
+///
+/// // `into_iter` returns the items in eviction order, which is FIFO.
+/// assert_eq!(
+///     cache.into_iter().collect::<Vec<_>>(),
+///     [
+///         (2, "two".to_string()),
+///         (3, "three".to_string()),
+///         (4, "four".to_string()),
+///     ]
+/// );
+/// ```
+pub type FiFo<Key, Value> = Cache<Key, Value, FiFoPolicy>;
+
+/// A last-in-first-out (LIFO) cache.
+///
+/// Evicts the entry that was inserted most recently when the cache is full.
+/// This policy treats the cache as a stack where the most recently inserted
+/// item is removed first, regardless of access patterns.
+///
+/// # Time Complexity
+/// - Insert/Get/Remove: O(1) average, O(n) worst case
+/// - Peek/Contains: O(1) average, O(n) worst case
+/// - Pop/Clear: O(1)
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::LiFo;
+///
+/// let mut cache = LiFo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// cache.insert(1, "one".to_string());
+/// cache.insert(2, "two".to_string());
+/// cache.insert(3, "three".to_string());
+///
+/// cache.get(&1); // Access key 1 - this doesn't affect eviction order in LIFO
+/// cache.insert(4, "four".to_string()); // Evicts key 3 (most recently inserted)
+///
+/// // `into_iter` returns the items in eviction order, which is LIFO.
+/// assert_eq!(
+///     cache.into_iter().collect::<Vec<_>>(),
+///     [
+///         (4, "four".to_string()),
+///         (2, "two".to_string()),
+///         (1, "one".to_string()),
+///     ]
+/// );
+/// ```
+pub type LiFo<Key, Value> = Cache<Key, Value, LiFoPolicy>;
 
 /// A generic cache implementation with configurable eviction policies.
 ///

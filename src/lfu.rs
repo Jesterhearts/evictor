@@ -279,7 +279,6 @@ fn unlink_node<K, T>(
     unlinked
 }
 
-/// Returns the prev/next pointers if the bucket was removed.
 fn unlink_bucket(metadata: &mut LfuMetadata, frequency: u64) -> FreqBucket {
     if metadata.frequency_head_tail.len() <= 1 {
         let bucket = metadata

@@ -6,7 +6,10 @@ use crate::{
     Policy,
     RandomState,
     private,
-    utils::swap_remove_ll_entry,
+    utils::{
+        impl_ll_iters,
+        swap_remove_ll_entry,
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -15,9 +18,8 @@ pub struct MruPolicy;
 
 impl private::Sealed for MruPolicy {}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[doc(hidden)]
-#[derive(Default)]
 pub struct MruMetadata {
     pub head: usize,
     pub tail: usize,
@@ -143,64 +145,6 @@ impl<T> Policy<T> for MruPolicy {
         IntoEntriesIter {
             queue: queue.into_iter().map(Some).collect(),
             index: Some(metadata.tail),
-        }
-    }
-}
-
-struct Iter<'q, K, T> {
-    queue: &'q indexmap::IndexMap<K, MruEntry<T>, RandomState>,
-    index: Option<usize>,
-}
-
-impl<'q, K, T> Iterator for Iter<'q, K, T> {
-    type Item = (&'q K, &'q T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.index {
-            let (key, entry) = self.queue.get_index(index)?;
-            self.index = entry.next;
-            Some((key, entry.value()))
-        } else {
-            None
-        }
-    }
-}
-
-#[doc(hidden)]
-pub struct IntoIter<K, T> {
-    queue: Vec<Option<(K, MruEntry<T>)>>,
-    index: Option<usize>,
-}
-
-impl<K, T> Iterator for IntoIter<K, T> {
-    type Item = (K, T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.index {
-            let (key, entry) = self.queue.get_mut(index)?.take()?;
-            self.index = entry.next;
-            Some((key, entry.into_value()))
-        } else {
-            None
-        }
-    }
-}
-
-struct IntoEntriesIter<K, T> {
-    queue: Vec<Option<(K, MruEntry<T>)>>,
-    index: Option<usize>,
-}
-
-impl<K, T> Iterator for IntoEntriesIter<K, T> {
-    type Item = (K, MruEntry<T>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.index {
-            let (key, entry) = self.queue.get_mut(index)?.take()?;
-            self.index = entry.next;
-            Some((key, entry))
-        } else {
-            None
         }
     }
 }
@@ -1693,3 +1637,5 @@ mod tests {
         assert_eq!(cache.tail().unwrap().0, &"C");
     }
 }
+
+impl_ll_iters!(MruEntry);

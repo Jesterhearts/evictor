@@ -8,7 +8,10 @@ use crate::{
     Policy,
     RandomState,
     private,
-    utils::swap_remove_ll_entry,
+    utils::{
+        impl_ll_iters,
+        swap_remove_ll_entry,
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -49,9 +52,8 @@ impl<T> EntryValue<T> for LruEntry<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[doc(hidden)]
-#[derive(Default)]
 pub struct LruMetadata {
     head: usize,
     tail: usize,
@@ -148,63 +150,7 @@ impl<T> Policy<T> for LruPolicy {
     }
 }
 
-struct Iter<'q, K, T> {
-    queue: &'q IndexMap<K, LruEntry<T>, RandomState>,
-    index: Option<usize>,
-}
-
-impl<'q, K, T> Iterator for Iter<'q, K, T> {
-    type Item = (&'q K, &'q T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.index {
-            let (key, entry) = self.queue.get_index(index)?;
-            self.index = entry.next;
-            Some((key, entry.value()))
-        } else {
-            None
-        }
-    }
-}
-
-#[doc(hidden)]
-pub struct IntoIter<K, T> {
-    queue: Vec<Option<(K, LruEntry<T>)>>,
-    index: Option<usize>,
-}
-
-impl<K, T> Iterator for IntoIter<K, T> {
-    type Item = (K, T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.index {
-            let (key, entry) = self.queue.get_mut(index)?.take()?;
-            self.index = entry.next;
-            Some((key, entry.into_value()))
-        } else {
-            None
-        }
-    }
-}
-
-struct IntoEntriesIter<K, T> {
-    queue: Vec<Option<(K, LruEntry<T>)>>,
-    index: Option<usize>,
-}
-
-impl<K, T> Iterator for IntoEntriesIter<K, T> {
-    type Item = (K, LruEntry<T>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.index {
-            let (key, entry) = self.queue.get_mut(index)?.take()?;
-            self.index = entry.next;
-            Some((key, entry))
-        } else {
-            None
-        }
-    }
-}
+impl_ll_iters!(LruEntry);
 
 #[cfg(test)]
 mod tests {
