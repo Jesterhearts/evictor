@@ -1,8 +1,3 @@
-//! Most Recently Used (MRU) cache implementation.
-//!
-//! This module provides the MRU eviction policy, which removes the most
-//! recently accessed entry when the cache reaches capacity.
-
 use std::hash::Hash;
 
 use crate::{
@@ -11,16 +6,15 @@ use crate::{
     Policy,
     RandomState,
     private,
+    utils::swap_remove_ll_entry,
 };
 
-/// MRU cache eviction policy implementation.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct MruPolicy;
 
 impl private::Sealed for MruPolicy {}
 
-/// Metadata for MRU policy tracking head, tail, and aging counter.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 #[derive(Default)]
@@ -37,7 +31,6 @@ impl Metadata for MruMetadata {
     }
 }
 
-/// MRU cache entry containing value and linked list pointers.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct MruEntry<V> {
@@ -57,11 +50,6 @@ impl<T> EntryValue<T> for MruEntry<T> {
         }
     }
 
-    fn prepare_for_reinsert(&mut self) {
-        self.next = None;
-        self.prev = None;
-    }
-
     fn into_value(self) -> T {
         self.value
     }
@@ -77,18 +65,18 @@ impl<T> EntryValue<T> for MruEntry<T> {
 
 impl<T> Policy<T> for MruPolicy {
     type EntryType = MruEntry<T>;
+    type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = MruMetadata;
 
-    fn touch_entry(
+    fn touch_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut indexmap::IndexMap<impl Hash + Eq, Self::EntryType, RandomState>,
+        queue: &mut indexmap::IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
         }
 
-        // Move the accessed entry to the tail of the queue
         let old_tail = metadata.tail;
         if old_tail == index {
             return index;
@@ -117,84 +105,103 @@ impl<T> Policy<T> for MruPolicy {
         index
     }
 
-    fn iter_removed_pairs_in_insertion_order<K>(
-        pairs: Vec<(K, Self::EntryType)>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)> {
-        pairs.into_iter().rev()
-    }
-
     fn swap_remove_entry<K: Hash + Eq>(
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut indexmap::IndexMap<K, Self::EntryType, RandomState>,
-    ) -> (usize, Option<(K, Self::EntryType)>) {
-        if index >= queue.len() {
-            return (index, None);
-        }
+    ) -> Option<(K, Self::EntryType)> {
+        swap_remove_ll_entry!(index, metadata, queue)
+    }
 
-        if queue.len() == 1 {
-            // If there's only one entry, just remove it
-            return (index, queue.swap_remove_index(index));
+    fn iter<'q, K>(
+        metadata: &'q Self::MetadataType,
+        queue: &'q indexmap::IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (&'q K, &'q T)>
+    where
+        T: 'q,
+    {
+        Iter {
+            queue,
+            index: Some(metadata.tail),
         }
+    }
 
-        let (k, e) = queue.swap_remove_index(index).unwrap();
-        if queue.len() == 1 {
-            metadata.head = 0;
-            metadata.tail = 0;
-            queue[0].prev = None;
-            queue[0].next = None;
-            return (index, Some((k, e)));
+    fn into_iter<K>(
+        metadata: Self::MetadataType,
+        queue: indexmap::IndexMap<K, Self::EntryType, RandomState>,
+    ) -> IntoIter<K, T> {
+        IntoIter {
+            queue: queue.into_iter().map(Some).collect(),
+            index: Some(metadata.tail),
         }
+    }
 
-        if index == metadata.head {
-            // Head was removed, update it
-            metadata.head = e.prev.unwrap_or_default();
+    fn into_entries<K>(
+        metadata: Self::MetadataType,
+        queue: indexmap::IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        IntoEntriesIter {
+            queue: queue.into_iter().map(Some).collect(),
+            index: Some(metadata.tail),
         }
-        if metadata.head == queue.len() {
-            // Head was pointing to the perturbed index
-            metadata.head = index;
-        }
+    }
+}
 
-        if index == metadata.tail {
-            metadata.tail = e.next.unwrap_or_default();
-        }
-        if metadata.tail == queue.len() {
-            // Tail was pointing to the perturbed index
-            metadata.tail = index;
-        }
+struct Iter<'q, K, T> {
+    queue: &'q indexmap::IndexMap<K, MruEntry<T>, RandomState>,
+    index: Option<usize>,
+}
 
-        // Unlink the entry from the queue
-        if let Some(prev) = e.prev {
-            if prev == queue.len() {
-                queue[index].next = None;
-            } else {
-                queue[prev].next = e.next;
-            }
-        }
-        if let Some(next) = e.next {
-            if next == queue.len() {
-                queue[index].prev = None;
-            } else {
-                queue[next].prev = e.prev;
-            }
-        }
+impl<'q, K, T> Iterator for Iter<'q, K, T> {
+    type Item = (&'q K, &'q T);
 
-        if index == queue.len() {
-            return (index, Some((k, e)));
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_index(index)?;
+            self.index = entry.next;
+            Some((key, entry.value()))
+        } else {
+            None
         }
+    }
+}
 
-        // Update the links for the moved entry
-        if let Some(next) = queue[index].next {
-            debug_assert_eq!(queue[next].prev, Some(queue.len()));
-            queue[next].prev = Some(index);
+#[doc(hidden)]
+pub struct IntoIter<K, T> {
+    queue: Vec<Option<(K, MruEntry<T>)>>,
+    index: Option<usize>,
+}
+
+impl<K, T> Iterator for IntoIter<K, T> {
+    type Item = (K, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_mut(index)?.take()?;
+            self.index = entry.next;
+            Some((key, entry.into_value()))
+        } else {
+            None
         }
+    }
+}
 
-        if let Some(prev) = queue[index].prev {
-            debug_assert_eq!(queue[prev].next, Some(queue.len()));
-            queue[prev].next = Some(index);
+struct IntoEntriesIter<K, T> {
+    queue: Vec<Option<(K, MruEntry<T>)>>,
+    index: Option<usize>,
+}
+
+impl<K, T> Iterator for IntoEntriesIter<K, T> {
+    type Item = (K, MruEntry<T>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_mut(index)?.take()?;
+            self.index = entry.next;
+            Some((key, entry))
+        } else {
+            None
         }
-
-        (index, Some((k, e)))
     }
 }
 
@@ -245,10 +252,10 @@ mod tests {
 
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), Some(&10));
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), None);
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -263,10 +270,10 @@ mod tests {
 
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), Some(&30));
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (3, 30), (2, 20)]
+        );
     }
 
     #[test]
@@ -282,9 +289,7 @@ mod tests {
 
         mru.insert(3, 30);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30), (2, 20)]);
     }
 
     #[test]
@@ -298,9 +303,7 @@ mod tests {
 
         mru.insert(3, 30);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30), (2, 20)]);
     }
 
     #[test]
@@ -316,8 +319,8 @@ mod tests {
 
         mru.get(&2);
         mru.insert(3, 30);
-        assert_eq!(mru.get(&2), None);
-        assert_eq!(mru.get(&3), Some(&30));
+
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30)]);
     }
 
     #[test]
@@ -335,11 +338,10 @@ mod tests {
 
         mru.insert(5, 50);
 
-        assert_eq!(mru.get(&1), Some(&10));
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), None);
-        assert_eq!(mru.get(&4), Some(&40));
-        assert_eq!(mru.get(&5), Some(&50));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(5, 50), (1, 10), (2, 20), (4, 40)]
+        );
     }
 
     #[test]
@@ -353,10 +355,7 @@ mod tests {
         mru.get(&2);
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), None);
-        assert_eq!(mru.get(&3), Some(&30));
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(4, 40), (3, 30)]);
     }
 
     #[test]
@@ -371,9 +370,7 @@ mod tests {
         let value = mru.get_or_insert_with(3, |_| 30);
         assert_eq!(value, &30);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30), (2, 20)]);
     }
 
     #[test]
@@ -389,10 +386,10 @@ mod tests {
 
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), Some(&30));
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (3, 30), (2, 20)]
+        );
     }
 
     #[test]
@@ -403,15 +400,12 @@ mod tests {
             mru.insert(i, i * 10);
         }
 
-        assert_eq!(mru.get(&10), Some(&100));
-
-        let mut count = 0;
-        for i in 1..=10 {
-            if mru.get(&i).is_some() {
-                count += 1;
-            }
-        }
-        assert_eq!(count, 3);
+        // MRU cache should contain the 3 most recently inserted items
+        // but since we accessed item 10, it's not in the expected order
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(10, 100), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -424,10 +418,10 @@ mod tests {
 
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), Some(&10));
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), None);
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -445,10 +439,10 @@ mod tests {
 
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), Some(&10));
-        assert_eq!(mru.get(&2), None);
-        assert_eq!(mru.get(&3), Some(&30));
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (1, 10), (3, 30)]
+        );
     }
 
     #[test]
@@ -464,9 +458,7 @@ mod tests {
 
         mru.insert(3, 30);
 
-        assert_eq!(mru.get(&1), None);
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), Some(&30));
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30), (2, 20)]);
     }
 
     #[test]
@@ -507,10 +499,10 @@ mod tests {
 
         mru.insert(4, 40);
 
-        assert_eq!(mru.get(&1), Some(&10));
-        assert_eq!(mru.get(&2), Some(&20));
-        assert_eq!(mru.get(&3), None);
-        assert_eq!(mru.get(&4), Some(&40));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -528,9 +520,8 @@ mod tests {
         assert!(mru.contains_key(&2));
 
         mru.insert(3, 30);
-        assert!(mru.contains_key(&1));
-        assert!(!mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
+
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30), (1, 10)]);
     }
 
     #[test]
@@ -551,9 +542,11 @@ mod tests {
 
         mru.insert(4, 40);
         assert_eq!(mru.len(), 3);
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (3, 30), (1, 10)]
+        );
     }
 
     #[test]
@@ -615,67 +608,75 @@ mod tests {
         assert_eq!(mru.len(), 0);
         assert!(mru.is_empty());
         assert_eq!(mru.capacity(), 3);
-        assert!(!mru.contains_key(&1));
-        assert!(!mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
         assert!(mru.tail().is_none());
+
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
     fn test_mru_mutable_access() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
-        mru.insert(1, String::from("hello"));
-        mru.insert(2, String::from("world"));
-        mru.insert(3, String::from("test"));
+        mru.insert(1, "hello".to_string());
+        mru.insert(2, "world".to_string());
+        mru.insert(3, "test".to_string());
 
         if let Some(val) = mru.get_mut(&1) {
             val.push_str(" modified");
         }
 
-        assert_eq!(mru.get(&1), Some(&String::from("hello modified")));
+        assert_eq!(mru.get(&1), Some(&"hello modified".to_string()));
 
-        mru.insert(4, String::from("new"));
+        mru.insert(4, "new".to_string());
 
-        assert!(!mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [
+                (4, "new".to_string()),
+                (3, "test".to_string()),
+                (2, "world".to_string())
+            ]
+        );
     }
 
     #[test]
     fn test_mru_insert_mut() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
-        let val = mru.insert_mut(1, String::from("test"));
+        let val = mru.insert_mut(1, "test".to_string());
         val.push_str(" modified");
 
-        assert_eq!(mru.get(&1), Some(&String::from("test modified")));
+        assert_eq!(mru.get(&1), Some(&"test modified".to_string()));
 
-        let val = mru.insert_mut(1, String::from("replaced"));
+        let val = mru.insert_mut(1, "replaced".to_string());
         val.push_str(" again");
 
-        assert_eq!(mru.get(&1), Some(&String::from("replaced again")));
+        assert_eq!(mru.get(&1), Some(&"replaced again".to_string()));
     }
 
     #[test]
     fn test_mru_get_or_insert_with_mut() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
-        mru.insert(1, String::from("existing"));
+        mru.insert(1, "existing".to_string());
 
-        let val = mru.get_or_insert_with_mut(1, |_| String::from("new"));
+        let val = mru.get_or_insert_with_mut(1, |_| "new".to_string());
         val.push_str(" modified");
 
-        assert_eq!(mru.get(&1), Some(&String::from("existing modified")));
+        assert_eq!(mru.get(&1), Some(&"existing modified".to_string()));
 
-        let val = mru.get_or_insert_with_mut(2, |_| String::from("created"));
+        let val = mru.get_or_insert_with_mut(2, |_| "created".to_string());
         val.push_str(" also modified");
 
-        assert_eq!(mru.get(&2), Some(&String::from("created also modified")));
+        assert_eq!(mru.get(&2), Some(&"created also modified".to_string()));
 
-        mru.insert(3, String::from("third"));
-        assert!(mru.contains_key(&1));
-        assert!(!mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
+        mru.insert(3, "third".to_string());
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [
+                (3, "third".to_string()),
+                (1, "existing modified".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -687,10 +688,11 @@ mod tests {
         mru.extend(items);
 
         assert_eq!(mru.len(), 4);
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (3, 30), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -700,9 +702,11 @@ mod tests {
 
         assert_eq!(mru.len(), 3);
         assert_eq!(mru.capacity(), 3);
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(3, 30), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -713,9 +717,10 @@ mod tests {
         assert_eq!(mru.len(), 5);
         assert_eq!(mru.capacity(), 5);
 
-        for i in 1..=5 {
-            assert!(mru.contains_key(&i));
-        }
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(5, 50), (4, 40), (3, 30), (2, 20), (1, 10)]
+        );
     }
 
     #[test]
@@ -727,8 +732,8 @@ mod tests {
         mru.shrink_to_fit();
 
         assert_eq!(mru.len(), 2);
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
+
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(2, 20), (1, 10)]);
     }
 
     #[test]
@@ -745,22 +750,13 @@ mod tests {
         mru.get(&3);
 
         mru.insert(5, "fifth");
-
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
-
         mru.get(&1);
-
         mru.insert(6, "sixth");
 
-        assert!(!mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
-        assert!(mru.contains_key(&6));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(6, "sixth"), (5, "fifth"), (2, "second"), (4, "fourth")]
+        );
     }
 
     #[test]
@@ -853,19 +849,13 @@ mod tests {
         mru.insert(3, 30);
 
         mru.insert(4, 40);
-
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-
         mru.get(&1);
         mru.insert(5, 50);
 
-        assert!(!mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(5, 50), (4, 40), (2, 20)]
+        );
     }
 
     #[test]
@@ -882,21 +872,13 @@ mod tests {
         mru.get(&1);
 
         mru.insert(5, 50);
-
-        assert!(!mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
-
         mru.get(&3);
         mru.insert(6, 60);
 
-        assert!(mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
-        assert!(mru.contains_key(&6));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(6, 60), (5, 50), (4, 40), (2, 20)]
+        );
     }
 
     #[test]
@@ -939,14 +921,17 @@ mod tests {
         assert_eq!(mru.len(), 6);
         assert_eq!(mru.capacity(), 6);
 
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
-        assert!(mru.contains_key(&6));
-
-        assert_eq!(mru.peek(&1), Some(&"updated_one"));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [
+                (6, "six"),
+                (1, "updated_one"),
+                (5, "five"),
+                (4, "four"),
+                (3, "three"),
+                (2, "two")
+            ]
+        );
     }
 
     #[test]
@@ -991,11 +976,10 @@ mod tests {
 
         mru.insert(5, "five");
 
-        assert!(!mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(5, "five"), (4, "four"), (2, "updated_two"), (3, "three")]
+        );
     }
 
     #[test]
@@ -1011,11 +995,11 @@ mod tests {
         mru.retain(|&k, _| k % 2 == 0);
 
         assert_eq!(mru.len(), 2);
-        assert!(!mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(!mru.contains_key(&5));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, "four"), (2, "two")]
+        );
     }
 
     #[test]
@@ -1035,11 +1019,8 @@ mod tests {
         mru.retain(|&k, v| k <= 3 && v.len() > 3);
 
         assert_eq!(mru.len(), 1);
-        assert!(!mru.contains_key(&1));
-        assert!(!mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(!mru.contains_key(&4));
-        assert!(!mru.contains_key(&5));
+
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, "three")]);
     }
 
     #[test]
@@ -1053,9 +1034,11 @@ mod tests {
         mru.retain(|_, _| true);
 
         assert_eq!(mru.len(), 3);
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (2, "two"), (1, "one")]
+        );
     }
 
     #[test]
@@ -1070,9 +1053,8 @@ mod tests {
 
         assert_eq!(mru.len(), 0);
         assert!(mru.is_empty());
-        assert!(!mru.contains_key(&1));
-        assert!(!mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
+
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
@@ -1099,7 +1081,7 @@ mod tests {
         mru.retain(|&k, _| k != 1);
 
         assert_eq!(mru.len(), 0);
-        assert!(!mru.contains_key(&1));
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
@@ -1120,10 +1102,12 @@ mod tests {
         assert_eq!(mru.tail(), Some((&3, &"three")));
         mru.insert(4, "four");
 
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
         assert_eq!(mru.len(), 3);
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(4, "four"), (3, "three"), (1, "one")]
+        );
     }
 
     #[test]
@@ -1145,13 +1129,12 @@ mod tests {
         let expected_len = (0..100).filter(|&x| x % 3 == 0).count();
         assert_eq!(mru.len(), expected_len);
 
-        for i in 0..100 {
-            if i % 3 == 0 {
-                assert!(mru.contains_key(&i));
-            } else {
-                assert!(!mru.contains_key(&i));
-            }
-        }
+        let expected_keys: Vec<_> = (0..100)
+            .filter(|&x| x % 3 == 0)
+            .map(|x| (x, x * 10))
+            .rev()
+            .collect();
+        assert_eq!(mru.into_iter().collect::<Vec<_>>(), expected_keys);
     }
 
     #[test]
@@ -1174,15 +1157,15 @@ mod tests {
         mru.retain(|&k, _| k > 2);
 
         assert_eq!(mru.len(), 3);
-        assert!(!mru.contains_key(&1));
-        assert!(!mru.contains_key(&2));
-        assert!(mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&5));
 
         mru.insert(6, "six");
         mru.get(&3);
         assert_eq!(mru.len(), 4);
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (6, "six"), (4, "four"), (5, "five")]
+        );
     }
 
     #[test]
@@ -1200,16 +1183,21 @@ mod tests {
         mru.retain(|&k, _| k % 2 == 0);
 
         assert_eq!(mru.len(), 5);
-        for i in 1..=10 {
-            if i % 2 == 0 {
-                assert!(mru.contains_key(&i));
-            } else {
-                assert!(!mru.contains_key(&i));
-            }
-        }
 
         mru.insert(12, "new_item".to_string());
         assert_eq!(mru.len(), 6);
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [
+                (12, "new_item".to_string()),
+                (10, "value_10".to_string()),
+                (8, "value_8".to_string()),
+                (6, "value_6".to_string()),
+                (4, "value_4".to_string()),
+                (2, "value_2".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -1230,12 +1218,12 @@ mod tests {
         mru.retain(|&k, _| k != 3);
 
         assert_eq!(mru.len(), 3);
-        assert!(mru.contains_key(&1));
-        assert!(mru.contains_key(&2));
-        assert!(!mru.contains_key(&3));
-        assert!(mru.contains_key(&4));
-
         assert_eq!(mru.tail(), Some((&1, &"one")));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (4, "four"), (2, "two")]
+        );
     }
 
     #[test]
@@ -1295,11 +1283,413 @@ mod tests {
         mru.insert(12, 120);
 
         assert_eq!(mru.len(), 6);
-        assert!(mru.contains_key(&2));
-        assert!(mru.contains_key(&4));
-        assert!(mru.contains_key(&6));
-        assert!(mru.contains_key(&8));
-        assert!(mru.contains_key(&10));
-        assert!(mru.contains_key(&12));
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(12, 120), (10, 100), (8, 80), (6, 60), (4, 40), (2, 20)]
+        );
+    }
+
+    #[test]
+    fn test_mru_iter_empty_cache() {
+        let mru = Mru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+        let items: Vec<_> = mru.iter().collect();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_mru_iter_single_item() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+        mru.insert(1, "one");
+
+        let items: Vec<_> = mru.iter().collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], (&1, &"one"));
+    }
+
+    #[test]
+    fn test_mru_iter_eviction_order() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (2, "two"), (1, "one")]
+        );
+    }
+
+    #[test]
+    fn test_mru_iter_after_access() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        mru.get(&1);
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (3, "three"), (2, "two")]
+        );
+    }
+
+    #[test]
+    fn test_mru_iter_complex_access_pattern() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
+
+        mru.get(&2);
+        mru.get(&4);
+        mru.get(&1);
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (4, "four"), (2, "two"), (3, "three")]
+        );
+    }
+
+    #[test]
+    fn test_mru_iter_after_update() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        *mru.get_mut(&1).unwrap() = "updated_one";
+
+        let items: Vec<_> = mru.iter().collect();
+        assert_eq!(items, [(&1, &"updated_one"), (&3, &"three"), (&2, &"two")]);
+    }
+
+    #[test]
+    fn test_mru_iter_with_eviction() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        assert_eq!(
+            mru.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (1, "one")]
+        );
+    }
+
+    #[test]
+    fn test_mru_iter_eviction_after_access() {
+        let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+
+        mru.get(&1);
+
+        mru.insert(3, "three");
+
+        let items: Vec<_> = mru.iter().collect();
+        assert_eq!(items, [(&3, &"three"), (&2, &"two")]);
+    }
+
+    #[test]
+    fn test_mru_iter_consistency_with_tail() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        mru.insert(10, "ten");
+        mru.insert(20, "twenty");
+        mru.insert(30, "thirty");
+        mru.insert(40, "forty");
+
+        mru.get(&20);
+        mru.get(&30);
+
+        let tail = mru.tail();
+        let mut iter_items = mru.iter();
+        let first_iter_item = iter_items.next();
+
+        assert_eq!(tail, first_iter_item);
+    }
+
+    #[test]
+    fn test_mru_iter_multiple_iterations() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        let items1: Vec<_> = mru.iter().collect();
+        let items2: Vec<_> = mru.iter().collect();
+
+        assert_eq!(items1, items2);
+        assert_eq!(items1.len(), 3);
+    }
+
+    #[test]
+    fn test_mru_iter_after_remove() {
+        let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+        mru.insert(4, "four");
+
+        mru.get(&2);
+        mru.remove(&3);
+
+        let items: Vec<_> = mru.iter().collect();
+        assert_eq!(items, [(&2, &"two"), (&4, &"four"), (&1, &"one")]);
+    }
+
+    #[test]
+    fn test_mru_iter_repeated_access_pattern() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        mru.get(&1);
+        mru.get(&1);
+        mru.get(&1);
+
+        let items: Vec<_> = mru.iter().collect();
+        assert_eq!(items, [(&1, &"one"), (&3, &"three"), (&2, &"two")]);
+    }
+
+    #[test]
+    fn test_into_iter_matches_iter() {
+        let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
+
+        mru.insert(1, "one");
+        mru.insert(2, "two");
+        mru.insert(3, "three");
+
+        let items: Vec<_> = mru.iter().map(|(k, v)| (*k, *v)).collect();
+        let into_items: Vec<_> = mru.into_iter().collect();
+
+        assert_eq!(items, into_items);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_no_modification() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", vec![1, 2, 3]);
+        cache.insert("B", vec![4, 5, 6]);
+        cache.insert("C", vec![7, 8, 9]);
+
+        let original_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+
+        if let Some(entry) = cache.peek_mut(&"A") {
+            let _len = entry.len();
+        }
+
+        let new_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+        assert_eq!(original_order, new_order);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_with_modification() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", vec![1, 2, 3]);
+        cache.insert("B", vec![4, 5, 6]);
+        cache.insert("C", vec![7, 8, 9]);
+
+        assert_eq!(cache.tail().unwrap().0, &"C");
+
+        if let Some(mut entry) = cache.peek_mut(&"A") {
+            entry.push(4);
+        }
+
+        assert_eq!(cache.peek(&"A"), Some(&vec![1, 2, 3, 4]));
+        assert_eq!(cache.tail().unwrap().0, &"A");
+    }
+
+    #[test]
+    fn test_mru_peek_mut_nonexistent_key() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+
+        assert!(cache.peek_mut(&3).is_none());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_empty_cache() {
+        let mut cache = Mru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+        assert!(cache.peek_mut(&1).is_none());
+    }
+
+    #[test]
+    fn test_mru_peek_mut_single_item() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str("_modified");
+        }
+
+        assert_eq!(cache.peek(&1), Some(&"one_modified".to_string()));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.tail().unwrap().0, &1);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_with_eviction() {
+        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+
+        assert_eq!(cache.tail().unwrap().0, &2);
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            *entry += 5;
+        }
+
+        assert_eq!(cache.tail().unwrap().0, &1);
+
+        cache.insert(3, 30);
+
+        assert!(cache.peek(&1).is_none());
+        assert_eq!(cache.peek(&2), Some(&20));
+        assert_eq!(cache.peek(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_mru_peek_mut_preserve_order_on_no_modification() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        cache.get(&1);
+
+        let original_tail = cache.tail().map(|(k, _)| *k);
+
+        if let Some(entry) = cache.peek_mut(&2) {
+            let _value = *entry;
+        }
+
+        let new_tail = cache.tail().map(|(k, _)| *k);
+        assert_eq!(original_tail, new_tail);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_multiple_modifications() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "hello".to_string());
+        cache.insert(2, "world".to_string());
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str(" there");
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str(" friend");
+        }
+
+        assert_eq!(cache.peek(&1), Some(&"hello there friend".to_string()));
+        assert_eq!(cache.tail().unwrap().0, &1);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_ordering_consistency() {
+        let mut cache = Mru::new(NonZeroUsize::new(4).unwrap());
+        cache.insert(1, 100);
+        cache.insert(2, 200);
+        cache.insert(3, 300);
+        cache.insert(4, 400);
+
+        cache.get(&2);
+        cache.get(&1);
+
+        let before_modification: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+
+        if let Some(mut entry) = cache.peek_mut(&3) {
+            *entry += 1000;
+        }
+
+        let after_modification: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+
+        assert_ne!(before_modification[0].0, after_modification[0].0);
+        assert_eq!(after_modification[0].0, 3);
+        assert_eq!(cache.peek(&3), Some(&1300));
+        assert_eq!(cache.tail().unwrap().0, &3);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_complex_scenario() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("first", 1);
+        cache.insert("second", 2);
+        cache.insert("third", 3);
+
+        cache.get(&"first");
+
+        assert_eq!(cache.tail().unwrap().0, &"first");
+
+        if let Some(mut entry) = cache.peek_mut(&"second") {
+            *entry += 100;
+        }
+
+        assert_eq!(cache.peek(&"second"), Some(&102));
+        assert_eq!(cache.tail().unwrap().0, &"second");
+
+        cache.insert("fourth", 4);
+
+        assert!(!cache.contains_key(&"second"));
+        assert!(cache.contains_key(&"first"));
+        assert!(cache.contains_key(&"third"));
+        assert!(cache.contains_key(&"fourth"));
+    }
+
+    #[test]
+    fn test_mru_peek_mut_rapid_succession() {
+        let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(1, vec![1]);
+        cache.insert(2, vec![2]);
+
+        for i in 3..=5 {
+            if let Some(mut entry) = cache.peek_mut(&1) {
+                entry.push(i);
+            }
+        }
+
+        assert_eq!(cache.peek(&1), Some(&vec![1, 3, 4, 5]));
+        assert_eq!(cache.tail().unwrap().0, &1);
+    }
+
+    #[test]
+    fn test_mru_peek_mut_alternating_access() {
+        let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", 10);
+        cache.insert("B", 20);
+        cache.insert("C", 30);
+
+        if let Some(mut entry) = cache.peek_mut(&"A") {
+            *entry += 1;
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&"B") {
+            *entry += 2;
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&"C") {
+            *entry += 3;
+        }
+
+        assert_eq!(cache.peek(&"A"), Some(&11));
+        assert_eq!(cache.peek(&"B"), Some(&22));
+        assert_eq!(cache.peek(&"C"), Some(&33));
+        assert_eq!(cache.tail().unwrap().0, &"C");
     }
 }

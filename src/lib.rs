@@ -3,6 +3,8 @@
 mod lfu;
 mod lru;
 mod mru;
+mod r#ref;
+mod utils;
 
 use std::{
     fmt::Debug,
@@ -14,6 +16,7 @@ use indexmap::IndexMap;
 pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
+pub use r#ref::Entry;
 
 use crate::private::Sealed;
 
@@ -22,9 +25,7 @@ type RandomState = std::hash::RandomState;
 #[cfg(feature = "ahash")]
 type RandomState = ahash::RandomState;
 
-/// Private module to implement the sealed trait pattern.
 mod private {
-    /// Sealed trait to prevent external trait implementation.
     pub trait Sealed {}
 }
 
@@ -36,10 +37,6 @@ mod private {
 pub trait EntryValue<T>: Sealed {
     /// Creates a new entry containing the given value.
     fn new(value: T) -> Self;
-
-    /// Prepares the entry for reinsertion into the cache after being
-    /// temporarily removed and examined.
-    fn prepare_for_reinsert(&mut self);
 
     /// Converts the entry into its contained value.
     fn into_value(self) -> T;
@@ -74,6 +71,9 @@ pub trait Policy<T>: Sealed {
     /// The metadata type used by this policy to track eviction state.
     type MetadataType: Metadata;
 
+    /// The iterator type returned by `into_iter()`.
+    type IntoIter<K>: Iterator<Item = (K, T)>;
+
     /// Updates the entry's position in the eviction order.
     ///
     /// This method is called when an entry is accessed (via get, insert, etc.)
@@ -86,20 +86,11 @@ pub trait Policy<T>: Sealed {
     ///
     /// # Returns
     /// The new index of the entry after any reordering
-    fn touch_entry(
+    fn touch_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<impl Hash + Eq, Self::EntryType, RandomState>,
+        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize;
-
-    /// Returns an iterator over the removed pairs in insertion order.
-    /// In most cases, this will be the same as the order of removal.
-    /// In certain cases (e.g. MRU), the order may differ.
-    fn iter_removed_pairs_in_insertion_order<K>(
-        pairs: Vec<(K, Self::EntryType)>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)> {
-        pairs.into_iter()
-    }
 
     /// Removes the entry at the specified index and returns the index of the
     /// entry which replaced it.
@@ -107,20 +98,114 @@ pub trait Policy<T>: Sealed {
     /// This method handles the removal of an entry and updates the policy's
     /// internal state to maintain consistency.
     ///
+    /// **Note**: After the removal of the item at `index`, the element at
+    /// `index` **must be** the last element in the queue. That is, if you have
+    /// a queue like `[0, 1, 2, 3]`, and you remove index 1, the queue must
+    /// become `[0, 3, 2]`. This is relied on for insertion and retain
+    /// operations.
+    ///
     /// # Parameters
     /// - `index`: The index of the entry to remove
     /// - `metadata`: Mutable reference to policy metadata
     /// - `queue`: Mutable reference to the cache's storage
     ///
     /// # Returns
-    /// A tuple containing:
-    /// - The index that replaced the removed entry (for index map consistency)
     /// - The removed key-value pair, or None if the index was invalid
     fn swap_remove_entry<K: Hash + Eq>(
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> (usize, Option<(K, Self::EntryType)>);
+    ) -> Option<(K, Self::EntryType)>;
+
+    /// Returns an iterator over the entries in the cache in eviction order.
+    ///
+    /// The iterator yields key-value pairs in the order they would be evicted,
+    /// starting with the entry that would be evicted first (the "tail" of the
+    /// eviction order). The specific ordering depends on the policy:
+    ///
+    /// - **LRU**: Iterates from least recently used to most recently used
+    /// - **MRU**: Iterates from most recently used to least recently used
+    /// - **LFU**: Iterates from least frequently used to most frequently used,
+    ///   with ties broken by insertion/access order
+    ///
+    /// This is an internal trait method used by policy implementations.
+    ///
+    /// # Parameters
+    /// - `metadata`: Reference to policy-specific metadata for traversal
+    /// - `queue`: Reference to the cache's underlying storage
+    ///
+    /// # Returns
+    /// An iterator yielding `(&Key, &Value)` pairs in eviction order
+    fn iter<'q, K>(
+        metadata: &'q Self::MetadataType,
+        queue: &'q IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (&'q K, &'q T)>
+    where
+        T: 'q;
+
+    /// Converts the cache into an iterator over key-value pairs in eviction
+    /// order.
+    ///
+    /// This method consumes the cache and returns an iterator that yields `(K,
+    /// T)` pairs. The iteration order depends on the specific eviction
+    /// policy:
+    ///
+    /// - **LRU**: Items are yielded from least recently used to most recently
+    ///   used
+    /// - **MRU**: Items are yielded from most recently used to least recently
+    ///   used
+    /// - **LFU**: Items are yielded from least frequently used to most
+    ///   frequently used
+    ///
+    /// # Parameters
+    /// - `metadata`: The policy's metadata containing eviction state
+    ///   information
+    /// - `queue`: The cache's internal storage map containing all key-value
+    ///   pairs
+    ///
+    /// # Returns
+    /// An iterator that yields `(K, T)` pairs in the policy-specific eviction
+    /// order. The iterator takes ownership of the cache contents, making
+    /// this a consuming operation.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::{
+    ///     Cache,
+    ///     Lru,
+    /// };
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("a", 1);
+    /// cache.insert("b", 2);
+    /// cache.insert("c", 3);
+    ///
+    /// // For LRU, iteration goes from least recently used to most recently used
+    /// let pairs: Vec<_> = cache.into_iter().collect();
+    /// assert_eq!(pairs, vec![("a", 1), ("b", 2), ("c", 3)]);
+    /// ```
+    ///
+    /// # Performance
+    /// - Time complexity: O(n) where n is the number of cached items
+    /// - Space complexity: O(n) for the iterator state
+    ///
+    /// # Note
+    /// This method is typically called indirectly through the standard
+    /// library's `IntoIterator` trait implementation on `Cache<K, V,
+    /// PolicyType>`.
+    fn into_iter<K>(
+        metadata: Self::MetadataType,
+        queue: IndexMap<K, Self::EntryType, RandomState>,
+    ) -> Self::IntoIter<K>;
+
+    /// Converts the cache entries into an iterator of key-value pairs in
+    /// eviction order.
+    fn into_entries<K>(
+        metadata: Self::MetadataType,
+        queue: IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (K, Self::EntryType)>;
 }
 
 /// A least-recently-used (LRU) cache.
@@ -149,10 +234,15 @@ pub trait Policy<T>: Sealed {
 /// cache.get(&1); // Mark as recently used
 /// cache.insert(4, "four".to_string()); // Evicts key 2
 ///
-/// assert!(cache.contains_key(&1)); // Recently used, kept
-/// assert!(!cache.contains_key(&2)); // Least recently used, evicted
-/// assert!(cache.contains_key(&3));
-/// assert!(cache.contains_key(&4));
+/// // `into_iter` returns the items in eviction order, which is LRU first.
+/// assert_eq!(
+///     cache.into_iter().collect::<Vec<_>>(),
+///     [
+///         (3, "three".to_string()),
+///         (1, "one".to_string()),
+///         (4, "four".to_string()),
+///     ]
+/// );
 /// ```
 pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 
@@ -182,10 +272,15 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// cache.get(&1); // Mark as recently used
 /// cache.insert(4, "four".to_string()); // Evicts key 1
 ///
-/// assert!(!cache.contains_key(&1)); // Most recently used, evicted
-/// assert!(cache.contains_key(&2));
-/// assert!(cache.contains_key(&3));
-/// assert!(cache.contains_key(&4));
+/// // `into_iter` returns the items in eviction order, which is MRU first.
+/// assert_eq!(
+///     cache.into_iter().collect::<Vec<_>>(),
+///     [
+///         (4, "four".to_string()),
+///         (3, "three".to_string()),
+///         (2, "two".to_string()),
+///     ]
+/// );
 /// ```
 pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 
@@ -194,19 +289,10 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// This implementation uses frequency buckets with doubly-linked lists to
 /// achieve O(1) time complexity for all operations.
 ///
-/// The cache maintains frequency counters for each entry and uses a
-/// sophisticated bucketing system where entries with the same frequency are
-/// stored in doubly-linked lists. This allows for constant-time promotion
-/// between frequency levels.
-///
 /// # Time Complexity
 /// - Insert/Get/Remove: O(1) average, O(n) worst case
 /// - Peek/Contains: O(1) average, O(n) worst case
 /// - Pop/Clear: O(1)
-///
-/// # Space Complexity
-/// - O(`capacity`) memory usage plus frequency bucket metadata
-/// - Additional overhead for tracking frequency buckets (typically small)
 ///
 /// # Examples
 ///
@@ -215,27 +301,36 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 ///
 /// use evictor::Lfu;
 ///
-/// let mut cache = Lfu::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = Lfu::<i32, String>::new(NonZeroUsize::new(4).unwrap());
 ///
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
+/// cache.insert(4, "four".to_string());
 ///
 /// // Access key 1 multiple times to increase its frequency
 /// cache.get(&1);
 /// cache.get(&1);
 /// cache.get(&1);
 ///
-/// // Access key 2 once
+/// // Access key 2, 3 once
 /// cache.get(&2);
+/// cache.get(&3);
 ///
-/// // Key 3 has frequency 0 (never accessed after insertion)
-/// // Insert new item - this will evict the least frequently used (key 3)
-/// cache.insert(4, "four".to_string());
-/// assert!(!cache.contains_key(&3)); // Evicted (frequency 0)
-/// assert!(cache.contains_key(&1)); // Kept (frequency 3)
-/// assert!(cache.contains_key(&2)); // Kept (frequency 1)
-/// assert!(cache.contains_key(&4)); // Newly inserted
+/// // Key 4 has frequency 0 (never accessed after insertion)
+/// // Insert new item - this will evict the least frequently used (key 4)
+/// cache.insert(5, "five".to_string());
+///
+/// // `into_iter` returns the items in eviction order, which is LFU first, with LRU tiebreaking.
+/// assert_eq!(
+///     cache.into_iter().collect::<Vec<_>>(),
+///     [
+///         (5, "five".to_string()),
+///         (2, "two".to_string()),
+///         (3, "three".to_string()),
+///         (1, "one".to_string()),
+///     ]
+/// );
 /// ```
 pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 
@@ -329,7 +424,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// This method provides read-only access to a value without affecting the
     /// eviction order. Unlike [`get()`](Self::get), this will not mark the
-    /// entry as recently accessed.
+    /// entry as touched.
     ///
     /// # Arguments
     ///
@@ -349,13 +444,115 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
     /// cache.insert(1, "one".to_string());
+    /// cache.insert(2, "two".to_string());
+    ///
+    /// let previous_order = cache
+    ///     .iter()
+    ///     .map(|(k, v)| (*k, v.clone()))
+    ///     .collect::<Vec<_>>();
     ///
     /// // Peek doesn't affect eviction order
     /// assert_eq!(cache.peek(&1), Some(&"one".to_string()));
-    /// assert_eq!(cache.peek(&2), None);
+    /// assert_eq!(cache.peek(&3), None);
+    ///
+    /// assert_eq!(cache.into_iter().collect::<Vec<_>>(), previous_order);
     /// ```
     pub fn peek(&self, key: &Key) -> Option<&Value> {
         self.queue.get(key).map(|entry| entry.value())
+    }
+
+    /// Returns a mutable reference to the value, updating the cache if the
+    /// value is modified while borrowed.
+    ///
+    /// This method provides mutable access to a cached value through a smart
+    /// `Entry` wrapper that automatically updates the cache's eviction
+    /// order **only if** the value is actually modified during the borrow.
+    /// Unlike [`get_mut()`](Self::get_mut), which always marks an entry as
+    /// touched, `peek_mut` preserves the current eviction order unless changes
+    /// are made to the value.
+    ///
+    /// The returned `Entry` acts as a smart pointer that:
+    /// - Provides transparent access to the underlying value via
+    ///   `Deref`/`DerefMut`
+    /// - Tracks whether the value was modified during the borrow
+    /// - Automatically updates the cache's eviction order on drop if
+    ///   modifications occurred
+    /// - Leaves the eviction order unchanged if no modifications were made
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up in the cache
+    ///
+    /// # Returns
+    ///
+    /// * `Some(`[`Entry<'_, Key, Value, PolicyType>`](crate::Entry)`)` - If the
+    ///   key exists
+    /// * `None` - If the key is not found in the cache
+    ///
+    /// # Behavior
+    ///
+    /// ## No Modification
+    /// If you obtain an `Entry` but don't modify the value, the cache's
+    /// eviction order remains unchanged:
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", vec![1, 2, 3]);
+    /// cache.insert("B", vec![4, 5, 6]);
+    ///
+    /// let original_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+    ///
+    /// // Peek at the value without modifying it
+    /// if let Some(entry) = cache.peek_mut(&"A") {
+    ///     let _len = entry.len(); // Read-only access
+    ///     // No modifications made
+    /// }
+    ///
+    /// // Eviction order is preserved
+    /// let new_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+    /// assert_eq!(original_order, new_order);
+    /// ```
+    ///
+    /// ## With Modification
+    /// If you modify the value through the `Entry`, the cache automatically
+    /// updates the eviction order when the `Entry` is dropped:
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", vec![1, 2, 3]);
+    /// cache.insert("B", vec![4, 5, 6]);
+    /// cache.insert("C", vec![7, 8, 9]);
+    ///
+    /// // Before: eviction order is A -> B -> C (A would be evicted first)
+    /// assert_eq!(cache.tail().unwrap().0, &"A");
+    ///
+    /// // Modify "A" through peek_mut
+    /// if let Some(mut entry) = cache.peek_mut(&"A") {
+    ///     entry.push(4); // This modifies the value
+    /// } // Entry is dropped here, triggering cache update
+    ///
+    /// // After: "A" is now most recently used, "B" would be evicted first
+    /// assert_eq!(cache.tail().unwrap().0, &"B");
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - **Lookup**: O(1) average, O(n) worst case (same as hash map lookup)
+    /// - **No modification**: No additional overhead beyond the lookup
+    /// - **With modification**: O(1) cache reordering when the `Entry` is
+    ///   dropped
+    pub fn peek_mut(&'_ mut self, key: &Key) -> Option<Entry<'_, Key, Value, PolicyType>> {
+        self.queue
+            .get_index_of(key)
+            .map(|index| Entry::new(index, self))
     }
 
     /// Returns a reference to the entry that would be evicted next.
@@ -425,9 +622,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// Gets the value for a key, or inserts it using the provided function.
     ///
     /// If the key exists, returns a reference to the existing value and marks
-    /// it as recently accessed. If the key doesn't exist, calls the provided
-    /// function to create a new value, inserts it, and returns a reference to
-    /// it.
+    /// it as touched. If the key doesn't exist, calls the provided function to
+    /// create a new value, inserts it, and returns a reference to it.
     ///
     /// When inserting into a full cache, the policy determines which entry is
     /// evicted.
@@ -468,9 +664,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// This is the mutable version of
     /// [`get_or_insert_with()`](Self::get_or_insert_with). If the key
     /// exists, returns a mutable reference to the existing value and marks
-    /// it as recently accessed. If the key doesn't exist, calls the provided
-    /// function to create a new value, inserts it, and returns a mutable
-    /// reference to it.
+    /// it as touched. If the key doesn't exist, calls the provided function to
+    /// create a new value, inserts it, and returns a mutable reference to
+    /// it.
     ///
     /// When inserting into a full cache, the policy determines which entry is
     /// evicted.
@@ -520,12 +716,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                 // Our previous len was at capacity, but we just inserted a new entry.
                 // So we need to remove the oldest entry.
                 if len == self.capacity.get() {
-                    index = PolicyType::swap_remove_entry(
-                        self.metadata.tail_index(),
-                        &mut self.metadata,
-                        &mut self.queue,
-                    )
-                    .0;
+                    index = self.metadata.tail_index();
+                    PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue);
                 }
 
                 index
@@ -539,8 +731,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// Inserts a key-value pair into the cache.
     ///
     /// If the key already exists, its value is updated and the entry is marked
-    /// as recently accessed. If the key is new and the cache is at capacity,
-    /// the policy determines which entry is evicted to make room.
+    /// as touched. If the key is new and the cache is at capacity, the policy
+    /// determines which entry is evicted to make room.
     ///
     /// # Arguments
     ///
@@ -566,8 +758,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// // This will evict the least recently used entry (key 1)
     /// cache.insert(3, "three".to_string());
-    /// assert!(!cache.contains_key(&1));
-    /// assert!(cache.contains_key(&3));
+    ///
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     [(2, "two".to_string()), (3, "three".to_string())]
+    /// );
     /// ```
     pub fn insert(&mut self, key: Key, value: Value) -> &Value {
         self.insert_mut(key, value)
@@ -576,9 +771,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// Inserts a key-value pair into the cache.
     ///
     /// This is the mutable version of [`insert()`](Self::insert). If the key
-    /// already exists, its value is updated and the entry is marked as recently
-    /// accessed. If the key is new and the cache is at capacity, the policy
-    /// determines which entry is evicted to make room.
+    /// already exists, its value is updated and the entry is marked as touched.
+    /// If the key is new and the cache is at capacity, the policy determines
+    /// which entry is evicted to make room.
     ///
     /// # Arguments
     ///
@@ -612,7 +807,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert_mut(2, "two".to_string());
     /// let value = cache.insert_mut(3, "three".to_string());
     /// value.push_str("_latest");
-    /// assert_eq!(cache.len(), 2);
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     [(2, "two".to_string()), (3, "three_latest".to_string())]
+    /// );
     /// ```
     pub fn insert_mut(&mut self, key: Key, value: Value) -> &mut Value {
         let len = self.queue.len();
@@ -628,12 +826,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                 // Our previous len was at capacity, but we just inserted a new entry.
                 // So we need to remove the oldest entry.
                 if len == self.capacity.get() {
-                    index = PolicyType::swap_remove_entry(
-                        self.metadata.tail_index(),
-                        &mut self.metadata,
-                        &mut self.queue,
-                    )
-                    .0;
+                    index = self.metadata.tail_index();
+                    PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue);
                 }
 
                 index
@@ -644,7 +838,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         self.queue[index].value_mut()
     }
 
-    /// Gets a value from the cache, marking it as recently used.
+    /// Gets a value from the cache, marking it as touched.
     ///
     /// If the key exists, returns a reference to the value and updates the
     /// entry's position in the eviction order according to the policy.
@@ -673,12 +867,16 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// // Get and mark as recently used
     /// assert_eq!(cache.get(&1), Some(&"one".to_string()));
     /// assert_eq!(cache.get(&3), None);
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     vec![(2, "two".to_string()), (1, "one".to_string())]
+    /// );
     /// ```
     pub fn get(&mut self, key: &Key) -> Option<&Value> {
         self.get_mut(key).map(|v| &*v)
     }
 
-    /// Gets a value from the cache, marking it as recently used.
+    /// Gets a value from the cache, marking it as touched.
     ///
     /// This is the mutable version of [`get()`](Self::get). If the key exists,
     /// returns a mutable reference to the value and updates the entry's
@@ -713,6 +911,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// // Non-existent key returns None
     /// assert_eq!(cache.get_mut(&3), None);
+    ///
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     vec![(2, "two".to_string()), (1, "one_modified".to_string())]
+    /// );
     /// ```
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
         if let Some(index) = self.queue.get_index_of(key) {
@@ -751,7 +954,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let (key, value) = cache.pop().unwrap();
     /// assert_eq!(key, 1);
     /// assert_eq!(value, "one".to_string());
-    /// assert_eq!(cache.len(), 1);
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     vec![(2, "two".to_string())]
+    /// );
     /// ```
     pub fn pop(&mut self) -> Option<(Key, Value)> {
         PolicyType::swap_remove_entry(
@@ -759,7 +965,6 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
             &mut self.metadata,
             &mut self.queue,
         )
-        .1
         .map(|(key, entry)| (key, entry.into_value()))
     }
 
@@ -791,12 +996,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// assert_eq!(cache.remove(&1), Some("one".to_string()));
     /// assert_eq!(cache.remove(&1), None); // Already removed
-    /// assert_eq!(cache.len(), 1);
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     vec![(2, "two".to_string())]
+    /// );
     /// ```
     pub fn remove(&mut self, key: &Key) -> Option<Value> {
         if let Some(index) = self.queue.get_index_of(key) {
             PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue)
-                .1
                 .map(|(_, entry)| entry.into_value())
         } else {
             None
@@ -879,10 +1086,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let items = vec![(3, "three".to_string()), (4, "four".to_string())];
     /// cache.extend(items);
     ///
-    /// assert_eq!(cache.len(), 3);
-    /// assert_eq!(cache.peek(&2), Some(&"two".to_string()));
-    /// assert_eq!(cache.peek(&3), Some(&"three".to_string()));
-    /// assert_eq!(cache.peek(&4), Some(&"four".to_string()));
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     [
+    ///         (2, "two".to_string()),
+    ///         (3, "three".to_string()),
+    ///         (4, "four".to_string()),
+    ///     ]
+    /// );
     /// ```
     pub fn extend<I>(&mut self, iter: I)
     where
@@ -893,7 +1104,136 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         }
     }
 
+    /// Returns an iterator over cache entries in eviction order.
+    ///
+    /// The iterator yields key-value pairs `(&Key, &Value)` in the order they
+    /// would be evicted from the cache, starting with the entry that would be
+    /// evicted first. This allows you to inspect the cache's internal ordering
+    /// and understand which entries are most at risk of eviction. This does not
+    /// permute the order of the cache.
+    ///
+    /// The specific iteration order depends on the cache's eviction policy:
+    ///
+    /// ## LRU (Least Recently Used)
+    /// Iterates from **least recently used** to **most recently used**:
+    /// - First yielded: The entry accessed longest ago (would be evicted first)
+    /// - Last yielded: The entry accessed most recently (would be evicted last)
+    ///
+    /// ## MRU (Most Recently Used)  
+    /// Iterates from **most recently used** to **least recently used**:
+    /// - First yielded: The entry accessed most recently (would be evicted
+    ///   first)
+    /// - Last yielded: The entry accessed longest ago (would be evicted last)
+    ///
+    /// ## LFU (Least Frequently Used)
+    /// Iterates from **least frequently used** to **most frequently used**:
+    /// - Entries are ordered by access frequency (lower frequency first)
+    /// - Ties are broken by insertion/access order within frequency buckets
+    /// - First yielded: Entry with lowest access count (would be evicted first)
+    /// - Last yielded: Entry with highest access count (would be evicted last)
+    ///
+    /// # Time Complexity
+    /// - Creating the iterator: **O(1)**
+    /// - Iterating through all entries: **O(n)** where n is the cache size
+    /// - Each `next()` call: **O(1)** for LRU/MRU, **O(1) amortized** for LFU
+    ///
+    /// # Examples
+    ///
+    /// ## Basic Usage
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    /// cache.insert("C", 3);
+    ///
+    /// // LRU: Iterates from least recently used to most recently used
+    /// let items: Vec<_> = cache.iter().collect();
+    /// assert_eq!(items, [(&"A", &1), (&"B", &2), (&"C", &3)]);
+    /// ```
+    ///
+    /// ## After Access Pattern
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    /// cache.insert("C", 3);
+    ///
+    /// // Access "A" to make it recently used
+    /// cache.get(&"A");
+    ///
+    /// // Now "B" is least recently used, "A" is most recently used
+    /// let items: Vec<_> = cache.iter().collect();
+    /// assert_eq!(items, [(&"B", &2), (&"C", &3), (&"A", &1)]);
+    /// ```
+    ///
+    /// ## MRU Policy Example
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Mru;
+    ///
+    /// let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    /// cache.insert("C", 3);
+    ///
+    /// // MRU: Iterates from most recently used to least recently used
+    /// let items: Vec<_> = cache.iter().collect();
+    /// assert_eq!(items, [(&"C", &3), (&"B", &2), (&"A", &1)]);
+    /// ```
+    ///
+    /// ## LFU Policy Example
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lfu;
+    ///
+    /// let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    /// cache.insert("C", 3);
+    ///
+    /// // Access "A" multiple times to increase its frequency
+    /// cache.get(&"A");
+    /// cache.get(&"A");
+    /// cache.get(&"B"); // Access "B" once
+    ///
+    /// // LFU: "C" (freq=0), "B" (freq=1), "A" (freq=2)
+    /// let items: Vec<_> = cache.iter().collect();
+    /// assert_eq!(items, [(&"C", &3), (&"B", &2), (&"A", &1)]);
+    /// ```
+    ///
+    /// ## Consistency with `tail()`
+    /// The first item from the iterator always matches `tail()`:
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    ///
+    /// let tail_item = cache.tail();
+    /// let first_iter_item = cache.iter().next();
+    /// assert_eq!(tail_item, first_iter_item);
+    /// ```
+    pub fn iter(&self) -> impl Iterator<Item = (&Key, &Value)> {
+        PolicyType::iter(&self.metadata, &self.queue)
+    }
+
     /// Retains only the entries for which the predicate returns `true`.
+    ///
+    /// This iterates in **arbitrary order**. I.e. unlike `iter()`, the order of
+    /// items you see is not guaranteed to match the eviction order.
     ///
     /// This method removes all entries from the cache for which the provided
     /// closure returns `false`. The predicate is called with a reference to
@@ -902,19 +1242,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// retained values.
     ///
     /// The operation preserves the relative order of retained entries according
-    /// to their original insertion order, and the policy's eviction order is
-    /// reconstructed to maintain consistency.
+    /// to their original insertion order. This operation does not perturb the
+    /// eviction order, with the exception of entries that are removed.
     ///
     /// # Arguments
     ///
     /// * `f` - A closure that takes `(&Key, &mut Value)` and returns `true` for
     ///   entries that should be kept, `false` for entries that should be
     ///   removed
-    ///
-    /// # Performance
-    ///
-    /// The cache's internal state is completely rebuilt, so this operation
-    /// should be used sparingly for large caches.
     ///
     /// # Examples
     ///
@@ -931,34 +1266,24 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// // Keep only entries where the key is even
     /// cache.retain(|&key, _value| key % 2 == 0);
-    /// assert_eq!(cache.len(), 2);
-    /// assert!(cache.contains_key(&2));
-    /// assert!(cache.contains_key(&4));
-    /// assert!(!cache.contains_key(&1));
-    /// assert!(!cache.contains_key(&3));
+    /// assert_eq!(
+    ///     cache.into_iter().collect::<Vec<_>>(),
+    ///     [(2, "banana".to_string()), (4, "date".to_string())]
+    /// );
     /// ```
     pub fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut(&Key, &mut Value) -> bool,
     {
-        let mut kvs = Vec::with_capacity(self.queue.len());
-        while let Some((key, mut entry)) = PolicyType::swap_remove_entry(
-            self.metadata.tail_index(),
-            &mut self.metadata,
-            &mut self.queue,
-        )
-        .1
-        {
-            if f(&key, entry.value_mut()) {
-                entry.prepare_for_reinsert();
-                kvs.push((key, entry));
+        let mut offset = 0;
+        for idx in 0..self.queue.len() {
+            let Some((k, v)) = self.queue.get_index_mut(idx - offset) else {
+                break;
+            };
+            if !f(k, v.value_mut()) {
+                PolicyType::swap_remove_entry(idx - offset, &mut self.metadata, &mut self.queue);
+                offset += 1;
             }
-        }
-
-        self.metadata = PolicyType::MetadataType::default();
-        for (key, entry) in PolicyType::iter_removed_pairs_in_insertion_order(kvs) {
-            self.queue.insert(key, entry);
-            PolicyType::touch_entry(self.queue.len() - 1, &mut self.metadata, &mut self.queue);
         }
     }
 
@@ -968,14 +1293,66 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     }
 }
 
+impl<K, V, PolicyType: Policy<V>> IntoIterator for Cache<K, V, PolicyType> {
+    type IntoIter = PolicyType::IntoIter<K>;
+    type Item = (K, V);
+
+    /// Converts the cache into an iterator over key-value pairs.
+    ///
+    /// This method implements the standard library's `IntoIterator` trait,
+    /// allowing caches to be consumed and converted into iterators. The
+    /// iteration order follows the eviction policy's ordering:
+    ///
+    /// - **LRU**: From least recently used to most recently used
+    /// - **MRU**: From most recently used to least recently used
+    /// - **LFU**: From least frequently used to most frequently used
+    ///
+    /// # Returns
+    /// An iterator that yields `(K, V)` pairs in eviction order, consuming the
+    /// cache.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert(1, "first");
+    /// cache.insert(2, "second");
+    /// cache.insert(3, "third");
+    ///
+    /// // Convert to iterator and collect all pairs
+    /// let pairs: Vec<_> = cache.into_iter().collect();
+    /// assert_eq!(pairs, [(1, "first"), (2, "second"), (3, "third")]);
+    /// ```
+    ///
+    /// # Performance
+    /// - Time complexity: O(n) where n is the number of cached items
+    /// - Space complexity: O(n) for the iterator's internal state
+    ///
+    /// # Note
+    /// This is a consuming operation - the cache cannot be used after calling
+    /// `into_iter()`. Use `iter()` if you need to iterate without consuming the
+    /// cache.
+    fn into_iter(self) -> Self::IntoIter {
+        PolicyType::into_iter(self.metadata, self.queue)
+    }
+}
+
 impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(Key, Value)>
     for Cache<Key, Value, PolicyType>
 {
+    /// Creates a new cache from an iterator of key-value pairs.
+    ///
+    /// This method consumes the iterator and constructs a new cache, with a
+    /// **capacity of at least 1** and at most the number of items in the
+    /// iterator.
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = (Key, Value)>,
     {
-        let mut queue: IndexMap<Key, PolicyType::EntryType, ahash::RandomState> =
+        let mut queue: IndexMap<Key, PolicyType::EntryType, RandomState> =
             IndexMap::with_hasher(RandomState::default());
         let mut metadata = PolicyType::MetadataType::default();
 
@@ -1004,6 +1381,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
 
 #[cfg(test)]
 mod tests {
+    //! These are mostly just tests to make sure that if the stored k/v pairs
+    //! implement various traits, the Cache also implements those traits.
+
     #[test]
     fn test_lru_cache_clone() {
         use std::num::NonZeroUsize;
@@ -1057,5 +1437,62 @@ mod tests {
         assert_eq!(cloned_cache.len(), 2);
         assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
         assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_lfu_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            LfuPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, LfuPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
+    }
+
+    #[test]
+    fn test_lru_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            LruPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
+    }
+
+    #[test]
+    fn test_mru_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            MruPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
     }
 }

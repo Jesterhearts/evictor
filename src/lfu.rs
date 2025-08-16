@@ -1,13 +1,4 @@
-//! List-based Least Frequently Used (LFU) cache implementation with O(1)
-//! operations.
-//!
-//! This module provides an O(1) LFU eviction policy using frequency buckets
-//! and doubly-linked lists to track the least frequently used items.
-
-use std::{
-    collections::BTreeMap,
-    hash::Hash,
-};
+use std::hash::Hash;
 
 use indexmap::IndexMap;
 
@@ -19,14 +10,12 @@ use crate::{
     private,
 };
 
-/// List-based LFU cache eviction policy implementation with O(1) operations.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct LfuPolicy;
 
 impl private::Sealed for LfuPolicy {}
 
-/// List-based LFU cache entry with frequency tracking and list pointers.
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct LfuEntry<T> {
@@ -48,12 +37,6 @@ impl<T> EntryValue<T> for LfuEntry<T> {
         }
     }
 
-    fn prepare_for_reinsert(&mut self) {
-        self.prev = None;
-        self.next = None;
-        self.frequency = self.frequency.saturating_sub(1)
-    }
-
     fn into_value(self) -> T {
         self.value
     }
@@ -67,11 +50,19 @@ impl<T> EntryValue<T> for LfuEntry<T> {
     }
 }
 
-/// Metadata for list-based LFU policy tracking frequency buckets.
+#[derive(Debug, Clone, Default)]
+struct FreqBucket {
+    head: usize,
+    tail: usize,
+    next_bucket: Option<usize>,
+    prev_bucket: Option<usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 #[doc(hidden)]
 pub struct LfuMetadata {
-    frequency_head_tail: BTreeMap<u64, (usize, usize)>,
+    frequency_head_tail: IndexMap<u64, FreqBucket, RandomState>,
+    head_bucket: usize,
 }
 
 impl private::Sealed for LfuMetadata {}
@@ -79,30 +70,38 @@ impl private::Sealed for LfuMetadata {}
 impl Metadata for LfuMetadata {
     fn tail_index(&self) -> usize {
         self.frequency_head_tail
-            .iter()
-            .next()
-            .map_or(0, |(_, &(_, tail))| tail)
+            .get_index(self.head_bucket)
+            .map_or(0, |(_, bucket)| bucket.tail)
     }
 }
 
 impl<T> Policy<T> for LfuPolicy {
     type EntryType = LfuEntry<T>;
+    type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = LfuMetadata;
 
-    fn touch_entry(
+    fn touch_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<impl Hash + Eq, Self::EntryType, RandomState>,
+        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
         }
 
-        unlink_node(index, metadata, queue);
+        let removed = unlink_node(index, metadata, queue);
 
+        let old_frequency = queue[index].frequency;
         queue[index].frequency = queue[index].frequency.saturating_add(1);
 
-        link_node(index, metadata, queue);
+        link_node(
+            index,
+            old_frequency,
+            queue[index].frequency,
+            removed,
+            metadata,
+            queue,
+        );
 
         index
     }
@@ -111,16 +110,16 @@ impl<T> Policy<T> for LfuPolicy {
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> (usize, Option<(K, Self::EntryType)>) {
+    ) -> Option<(K, Self::EntryType)> {
         if index >= queue.len() {
-            return (index, None);
+            return None;
         }
 
         unlink_node(index, metadata, queue);
 
         let result = queue.swap_remove_index(index);
         if index == queue.len() {
-            return (index, result);
+            return result;
         }
 
         if let Some(prev) = queue[index].prev {
@@ -130,27 +129,79 @@ impl<T> Policy<T> for LfuPolicy {
             queue[next].prev = Some(index);
         }
 
-        if let Some((head_idx, tail_idx)) = metadata
+        if let Some(bucket) = metadata
             .frequency_head_tail
             .get_mut(&queue[index].frequency)
         {
-            if *head_idx == queue.len() {
-                *head_idx = index;
+            if bucket.head == queue.len() {
+                bucket.head = index;
             }
-            if *tail_idx == queue.len() {
-                *tail_idx = index;
+            if bucket.tail == queue.len() {
+                bucket.tail = index;
             }
         }
 
-        (index, result)
+        result
+    }
+
+    fn iter<'q, K>(
+        metadata: &'q LfuMetadata,
+        queue: &'q IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (&'q K, &'q T)>
+    where
+        T: 'q,
+    {
+        let index = metadata
+            .frequency_head_tail
+            .get_index(metadata.head_bucket)
+            .map(|(_, bucket)| bucket.tail);
+        Iter {
+            queue,
+            index,
+            freq_bucket: metadata.head_bucket,
+            metadata,
+        }
+    }
+
+    fn into_iter<K>(
+        metadata: Self::MetadataType,
+        queue: IndexMap<K, Self::EntryType, RandomState>,
+    ) -> IntoIter<K, T> {
+        let index = metadata
+            .frequency_head_tail
+            .get_index(metadata.head_bucket)
+            .map(|(_, bucket)| bucket.tail);
+        IntoIter {
+            queue: queue.into_iter().map(Some).collect(),
+            index,
+            freq_bucket: metadata.head_bucket,
+            metadata,
+        }
+    }
+
+    fn into_entries<K>(
+        metadata: Self::MetadataType,
+        queue: IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        let index = metadata
+            .frequency_head_tail
+            .get_index(metadata.head_bucket)
+            .map(|(_, bucket)| bucket.tail);
+
+        IntoEntriesIter {
+            queue: queue.into_iter().map(Some).collect(),
+            index,
+            freq_bucket: metadata.head_bucket,
+            metadata,
+        }
     }
 }
 
-fn unlink_node<T>(
+fn unlink_node<K, T>(
     index: usize,
     metadata: &mut LfuMetadata,
-    queue: &mut IndexMap<impl Hash + Eq, LfuEntry<T>, RandomState>,
-) {
+    queue: &mut IndexMap<K, LfuEntry<T>, RandomState>,
+) -> Option<FreqBucket> {
     let frequency = queue[index].frequency;
     let prev = queue[index].prev;
     let next = queue[index].next;
@@ -162,44 +213,283 @@ fn unlink_node<T>(
         queue[next_idx].prev = prev;
     }
 
-    if let Some((head_idx, tail_idx)) = metadata.frequency_head_tail.get_mut(&frequency) {
-        if *head_idx == index {
-            if let Some(next_idx) = next {
-                *head_idx = next_idx;
-            } else {
-                metadata.frequency_head_tail.remove(&frequency);
+    let mut unlinked = None;
+    if let Some(bucket) = metadata.frequency_head_tail.get_mut(&frequency) {
+        if bucket.head == index {
+            if let Some(prev) = prev {
+                bucket.head = prev;
+            } else if bucket.head == bucket.tail {
+                unlinked = Some(unlink_bucket(metadata, frequency));
             }
-        } else if *tail_idx == index {
-            if let Some(prev_idx) = prev {
-                *tail_idx = prev_idx;
-            } else {
-                metadata.frequency_head_tail.remove(&frequency);
+        } else if bucket.tail == index {
+            if let Some(next) = next {
+                bucket.tail = next;
+            } else if bucket.head == bucket.tail {
+                unlinked = Some(unlink_bucket(metadata, frequency));
             }
         }
     }
 
     queue[index].prev = None;
     queue[index].next = None;
+
+    unlinked
 }
 
-fn link_node<T>(
-    index: usize,
-    metadata: &mut LfuMetadata,
-    queue: &mut IndexMap<impl Hash + Eq, LfuEntry<T>, RandomState>,
-) {
-    metadata
+/// Returns the prev/next pointers if the bucket was removed.
+fn unlink_bucket(metadata: &mut LfuMetadata, frequency: u64) -> FreqBucket {
+    if metadata.frequency_head_tail.len() <= 1 {
+        let bucket = metadata
+            .frequency_head_tail
+            .swap_remove(&frequency)
+            .expect("Frequency bucket should exist when unlinking");
+        metadata.head_bucket = 0;
+        return bucket;
+    }
+
+    let (removed_index, _, mut removed) = metadata
         .frequency_head_tail
-        .entry(queue[index].frequency)
-        .and_modify(|(head_idx, _)| {
-            queue[*head_idx].prev = Some(index);
-            queue[index].next = Some(*head_idx);
-            *head_idx = index;
-        })
-        .or_insert_with(|| {
-            queue[index].prev = None;
-            queue[index].next = None;
-            (index, index)
-        });
+        .swap_remove_full(&frequency)
+        .expect("Frequency bucket should exist");
+    let len = metadata.frequency_head_tail.len();
+
+    if removed_index == len {
+        if metadata.head_bucket == len {
+            metadata.head_bucket = removed.next_bucket.unwrap_or_default();
+        }
+
+        let removed_next = removed.next_bucket;
+        let removed_prev = removed.prev_bucket;
+
+        if let Some(next) = removed_next {
+            metadata.frequency_head_tail[next].prev_bucket = removed_prev;
+        }
+
+        if let Some(prev) = removed_prev {
+            metadata.frequency_head_tail[prev].next_bucket = removed_next;
+        }
+
+        return removed;
+    }
+
+    if removed.next_bucket == Some(len) {
+        removed.next_bucket = Some(removed_index);
+    }
+
+    if removed.prev_bucket == Some(len) {
+        removed.prev_bucket = Some(removed_index)
+    }
+
+    if metadata.head_bucket == removed_index {
+        metadata.head_bucket = removed.next_bucket.unwrap_or_default();
+    }
+    if metadata.head_bucket == len {
+        metadata.head_bucket = removed_index;
+    }
+
+    let permuted = &metadata.frequency_head_tail[removed_index];
+    let permuted_next = permuted.next_bucket;
+    let permuted_prev = permuted.prev_bucket;
+
+    if let Some(next) = permuted_next {
+        if next == removed_index {
+            metadata.frequency_head_tail[removed_index].next_bucket = None;
+        } else {
+            metadata.frequency_head_tail[next].prev_bucket = Some(removed_index);
+        }
+    }
+
+    if let Some(prev) = permuted_prev {
+        if prev == removed_index {
+            metadata.frequency_head_tail[removed_index].prev_bucket = None;
+        } else {
+            metadata.frequency_head_tail[prev].next_bucket = Some(removed_index);
+        }
+    }
+
+    if let Some(prev) = removed.prev_bucket {
+        metadata.frequency_head_tail[prev].next_bucket = removed.next_bucket;
+    }
+
+    if let Some(next) = removed.next_bucket {
+        metadata.frequency_head_tail[next].prev_bucket = removed.prev_bucket;
+    }
+
+    removed
+}
+
+fn link_node<K, T>(
+    node_index: usize,
+    prev_frequency: u64,
+    frequency: u64,
+    removed: Option<FreqBucket>,
+    metadata: &mut LfuMetadata,
+    queue: &mut IndexMap<K, LfuEntry<T>, RandomState>,
+) {
+    debug_assert!(prev_frequency < frequency);
+    if let Some(bucket) = metadata.frequency_head_tail.get_mut(&frequency) {
+        queue[bucket.head].next = Some(node_index);
+        queue[node_index].prev = Some(bucket.head);
+        queue[node_index].next = None;
+        bucket.head = node_index;
+        return;
+    }
+
+    let insertion_index = metadata.frequency_head_tail.len();
+
+    let is_new_bucket = removed.is_none();
+    let mut removed = removed.unwrap_or_default();
+    removed.head = node_index;
+    removed.tail = node_index;
+
+    if let Some((prev_index, _, bucket)) =
+        metadata.frequency_head_tail.get_full_mut(&prev_frequency)
+    {
+        let old_next = bucket.next_bucket;
+        bucket.next_bucket = Some(insertion_index);
+        if let Some(next) = old_next {
+            metadata.frequency_head_tail[next].prev_bucket = Some(insertion_index);
+        }
+
+        removed.next_bucket = old_next;
+        removed.prev_bucket = Some(prev_index);
+
+        metadata.frequency_head_tail.insert(frequency, removed);
+        return;
+    }
+
+    if let Some(prev) = removed.prev_bucket {
+        metadata.frequency_head_tail[prev].next_bucket = Some(insertion_index);
+    }
+    if let Some(next) = removed.next_bucket {
+        metadata.frequency_head_tail[next].prev_bucket = Some(insertion_index);
+    }
+    if metadata.head_bucket != insertion_index
+        && (is_new_bucket
+            || metadata
+                .frequency_head_tail
+                .get_index(metadata.head_bucket)
+                .map(|kv| *kv.0)
+                > Some(frequency))
+    {
+        metadata.frequency_head_tail[metadata.head_bucket].prev_bucket = Some(insertion_index);
+        removed.next_bucket = Some(metadata.head_bucket);
+        removed.prev_bucket = None;
+        metadata.head_bucket = insertion_index;
+    }
+
+    debug_assert!(
+        metadata
+            .frequency_head_tail
+            .get_index(metadata.head_bucket)
+            .map(|kv| *kv.0)
+            <= Some(frequency)
+    );
+
+    metadata.frequency_head_tail.insert(frequency, removed);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Iter<'q, K, T> {
+    metadata: &'q LfuMetadata,
+    queue: &'q IndexMap<K, LfuEntry<T>, RandomState>,
+    freq_bucket: usize,
+    index: Option<usize>,
+}
+
+impl<'q, K, T> Iterator for Iter<'q, K, T> {
+    type Item = (&'q K, &'q T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_index(index)?;
+            if let Some(next) = entry.next {
+                self.index = Some(next);
+            } else {
+                let next_bucket = self
+                    .metadata
+                    .frequency_head_tail
+                    .get_index(self.freq_bucket)
+                    .and_then(|(_, bucket)| bucket.next_bucket);
+                self.freq_bucket = next_bucket.unwrap_or(self.freq_bucket);
+                self.index = next_bucket
+                    .map(|next_bucket| self.metadata.frequency_head_tail[next_bucket].tail);
+            }
+
+            Some((key, entry.value()))
+        } else {
+            None
+        }
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct IntoIter<K, T> {
+    metadata: LfuMetadata,
+    queue: Vec<Option<(K, LfuEntry<T>)>>,
+    freq_bucket: usize,
+    index: Option<usize>,
+}
+
+impl<K, T> Iterator for IntoIter<K, T> {
+    type Item = (K, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_mut(index)?.take()?;
+            if let Some(next) = entry.next {
+                self.index = Some(next);
+            } else {
+                let next_bucket = self
+                    .metadata
+                    .frequency_head_tail
+                    .get_index(self.freq_bucket)
+                    .and_then(|(_, bucket)| bucket.next_bucket);
+                self.freq_bucket = next_bucket.unwrap_or(self.freq_bucket);
+                self.index = next_bucket
+                    .map(|next_bucket| self.metadata.frequency_head_tail[next_bucket].tail);
+            }
+
+            Some((key, entry.into_value()))
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IntoEntriesIter<K, T> {
+    metadata: LfuMetadata,
+    queue: Vec<Option<(K, LfuEntry<T>)>>,
+    freq_bucket: usize,
+    index: Option<usize>,
+}
+
+impl<K, T> Iterator for IntoEntriesIter<K, T> {
+    type Item = (K, LfuEntry<T>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_mut(index)?.take()?;
+            if let Some(next) = entry.next {
+                self.index = Some(next);
+            } else {
+                let next_bucket = self
+                    .metadata
+                    .frequency_head_tail
+                    .get_index(self.freq_bucket)
+                    .and_then(|(_, bucket)| bucket.next_bucket);
+                self.freq_bucket = next_bucket.unwrap_or(self.freq_bucket);
+                self.index = next_bucket
+                    .map(|next_bucket| self.metadata.frequency_head_tail[next_bucket].tail);
+            }
+
+            Some((key, entry))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -223,7 +513,14 @@ mod tests {
 
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
-        assert_eq!(cache.len(), 3);
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (1, "one".to_string()),
+                (2, "two".to_string()),
+                (3, "three".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -238,9 +535,10 @@ mod tests {
 
         cache.insert(3, "three".to_string());
 
-        assert!(cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(3, "three".to_string()), (1, "one".to_string())]
+        );
     }
 
     #[test]
@@ -340,10 +638,14 @@ mod tests {
         let items = vec![(2, "two".to_string()), (3, "three".to_string())];
         cache.extend(items);
 
-        assert_eq!(cache.len(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (1, "one".to_string()),
+                (2, "two".to_string()),
+                (3, "three".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -356,27 +658,37 @@ mod tests {
 
         let cache: Lfu<i32, String> = items.into_iter().collect();
 
-        assert_eq!(cache.len(), 3);
         assert_eq!(cache.capacity(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (1, "one".to_string()),
+                (2, "two".to_string()),
+                (3, "three".to_string())
+            ]
+        )
     }
 
     #[test]
     fn test_lfu_cache_from_iter_overlapping() {
         let items = vec![
             (1, "one".to_string()),
-            (2, "two".to_string()),
             (3, "three".to_string()),
             (3, "three_new".to_string()),
+            (2, "two".to_string()),
         ];
 
         let cache: Lfu<i32, String> = items.into_iter().collect();
 
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
+        assert_eq!(cache.capacity(), 3);
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (1, "one".to_string()),
+                (2, "two".to_string()),
+                (3, "three_new".to_string())
+            ]
+        )
     }
 
     #[test]
@@ -419,9 +731,10 @@ mod tests {
         assert_eq!(cache.len(), 1);
 
         cache.insert(2, "two".to_string());
-        assert_eq!(cache.len(), 1);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(2, "two".to_string())]
+        );
     }
 
     #[test]
@@ -464,17 +777,14 @@ mod tests {
 
         cache.insert(4, "four".to_string());
 
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-
-        cache.insert(5, "five".to_string());
-
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&4));
-        assert!(cache.contains_key(&5));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (4, "four".to_string()),
+                (2, "two".to_string()),
+                (1, "one".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -513,10 +823,16 @@ mod tests {
         cache.insert(6, "value_6".to_string());
         cache.insert(7, "value_7".to_string());
 
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&1));
-        assert_eq!(cache.len(), 5);
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (6, "value_6".to_string()),
+                (7, "value_7".to_string()),
+                (1, "value_1".to_string()),
+                (2, "value_2".to_string()),
+                (3, "value_3".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -533,12 +849,11 @@ mod tests {
         assert_eq!(*value, "three");
 
         cache.insert(4, "four");
-        dbg!(&cache);
 
-        assert!(cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (4, "four"), (1, "one")]
+        );
     }
 
     #[test]
@@ -557,28 +872,41 @@ mod tests {
         assert_eq!(cache.len(), 4);
         assert_eq!(cache.peek(&1), Some(&"one_updated"));
         assert_eq!(cache.peek(&2), Some(&"two_updated"));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (3, "three"),
+                (4, "four"),
+                (1, "one_updated"),
+                (2, "two_updated"),
+            ]
+        )
     }
 
     #[test]
     fn test_lfu_cache_insert_mut_frequency_behavior() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
-        let val1 = cache.insert_mut(1, String::from("one"));
+        let val1 = cache.insert_mut(1, "one".to_string());
         val1.push_str("_modified");
 
-        cache.insert(2, String::from("two"));
-        cache.insert(3, String::from("three"));
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
 
         let val1_again = cache.get_mut(&1).unwrap();
         val1_again.push_str("_again");
 
-        cache.insert(4, String::from("four"));
+        cache.insert(4, "four".to_string());
 
         assert!(cache.contains_key(&1));
-        assert_eq!(cache.peek(&1), Some(&String::from("one_modified_again")));
-        assert_eq!(cache.len(), 3);
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (3, "three".to_string()),
+                (4, "four".to_string()),
+                (1, "one_modified_again".to_string())
+            ]
+        )
     }
 
     #[test]
@@ -609,26 +937,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lfu_heap_property_maintenance() {
-        let mut cache = Lfu::new(NonZeroUsize::new(10).unwrap());
-
-        for i in 0..10 {
-            cache.insert(i, format!("value_{}", i));
-        }
-
-        for i in 0..5 {
-            cache.get(&i);
-            cache.get(&i);
-        }
-
-        for i in 10..15 {
-            cache.insert(i, format!("value_{}", i));
-        }
-
-        assert_eq!(cache.len(), 10);
-    }
-
-    #[test]
     fn test_lfu_frequency_consistency() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -645,12 +953,16 @@ mod tests {
 
         cache.insert(6, "six");
 
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&6));
-
-        assert!(!(cache.contains_key(&4) && cache.contains_key(&5)));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (5, "five"),
+                (6, "six"),
+                (3, "three"),
+                (2, "two"),
+                (1, "one"),
+            ]
+        )
     }
 
     #[test]
@@ -666,11 +978,10 @@ mod tests {
         assert_eq!(cache.len(), 3);
         assert!(cache.contains_key(&4));
 
-        let remaining_count = [1, 2, 3]
-            .iter()
-            .filter(|&&k| cache.contains_key(&k))
-            .count();
-        assert_eq!(remaining_count, 2);
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(2, "two"), (3, "three"), (4, "four"),]
+        );
     }
 
     #[test]
@@ -694,18 +1005,9 @@ mod tests {
         cache.get(&"D");
 
         cache.insert("E", 5);
-        assert!(cache.contains_key(&"A"));
-        assert!(cache.contains_key(&"B"));
-        assert!(cache.contains_key(&"C"));
-        assert!(!cache.contains_key(&"D"));
-        assert!(cache.contains_key(&"E"));
-
-        cache.insert("F", 6);
-        assert!(cache.contains_key(&"A"));
-        assert!(cache.contains_key(&"B"));
-        assert!(cache.contains_key(&"C"));
-        assert!(!cache.contains_key(&"E"));
-        assert!(cache.contains_key(&"F"));
+        let mut current_state: Vec<_> = cache.into_iter().collect();
+        current_state.sort();
+        assert_eq!(current_state, [("A", 1), ("B", 2), ("C", 3), ("E", 5)]);
     }
 
     #[test]
@@ -752,30 +1054,30 @@ mod tests {
 
         cache.insert(4, 40);
 
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-        assert_eq!(cache.len(), 3);
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(3, 30), (4, 40), (1, 10)]
+        );
     }
 
     #[test]
     fn test_lfu_mutable_references() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
-        let val = cache.insert_mut(1, String::from("test"));
+        let val = cache.insert_mut(1, "test".to_string());
         val.push_str("_modified");
 
-        cache.insert(2, String::from("second"));
-        cache.insert(3, String::from("third"));
+        cache.insert(2, "second".to_string());
+        cache.insert(3, "third".to_string());
 
         if let Some(val) = cache.get_mut(&1) {
             val.push_str("_again");
         }
 
-        cache.insert(4, String::from("fourth"));
+        cache.insert(4, "fourth".to_string());
 
         assert!(cache.contains_key(&1));
-        assert_eq!(cache.peek(&1), Some(&String::from("test_modified_again")));
+        assert_eq!(cache.peek(&1), Some(&"test_modified_again".to_string()));
         assert!(cache.contains_key(&4));
         assert_eq!(cache.len(), 3);
     }
@@ -789,42 +1091,7 @@ mod tests {
 
         cache.insert(2, "two");
         assert_eq!(cache.len(), 1);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-
-        cache.get(&2);
-        cache.insert(3, "three");
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-    }
-
-    #[test]
-    fn test_lfu_stress_heap_maintenance() {
-        let mut cache = Lfu::new(NonZeroUsize::new(20).unwrap());
-
-        for i in 0..20 {
-            cache.insert(i, i);
-        }
-
-        for i in 0..100 {
-            match i % 4 {
-                0 => {
-                    cache.insert(i + 100, i);
-                }
-                1 => {
-                    cache.get(&(i % 20));
-                }
-                2 => {
-                    cache.remove(&(i % 50));
-                }
-                3 => {
-                    cache.get_or_insert_with(i + 200, |k| *k);
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        assert!(cache.len() <= 20);
+        assert_eq!(cache.into_iter().collect::<Vec<_>>(), [(2, "two")]);
     }
 
     #[test]
@@ -911,16 +1178,11 @@ mod tests {
         cache.get(&"high");
 
         cache.insert("new1", 4);
-        assert!(!cache.contains_key(&"low"));
-        assert!(cache.contains_key(&"medium"));
-        assert!(cache.contains_key(&"high"));
-        assert!(cache.contains_key(&"new1"));
 
-        cache.insert("new2", 5);
-        assert!(cache.contains_key(&"medium"));
-        assert!(cache.contains_key(&"high"));
-        assert!(!cache.contains_key(&"new1"));
-        assert!(cache.contains_key(&"new2"));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [("new1", 4), ("medium", 2), ("high", 3)]
+        );
     }
 
     #[test]
@@ -947,10 +1209,10 @@ mod tests {
 
         cache.insert(4, "four");
 
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(4, "four"), (2, "updated_second"), (1, "final_first")]
+        );
     }
 
     #[test]
@@ -978,16 +1240,11 @@ mod tests {
         assert_eq!(cache.tail(), Some((&3, &800)));
 
         cache.insert(4, 900);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
 
-        cache.insert(5, 1000);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&4));
-        assert!(cache.contains_key(&5));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(4, 900), (2, 600), (1, 700)]
+        );
     }
 
     #[test]
@@ -1011,11 +1268,15 @@ mod tests {
         assert!(cache.contains_key(&3));
         assert_eq!(cache.peek(&3), Some(&"final_three"));
 
-        assert!(cache.contains_key(&2));
-
-        assert!(cache.contains_key(&5));
-
-        assert!(!(cache.contains_key(&1) && cache.contains_key(&4)));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (4, "four"),
+                (5, "five"),
+                (2, "updated_two"),
+                (3, "final_three")
+            ]
+        );
     }
 
     #[test]
@@ -1050,12 +1311,10 @@ mod tests {
 
         cache.retain(|&k, _| k % 2 == 0);
 
-        assert_eq!(cache.len(), 2);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-        assert!(!cache.contains_key(&5));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(2, "two"), (4, "four")]
+        );
     }
 
     #[test]
@@ -1077,12 +1336,7 @@ mod tests {
 
         cache.retain(|&k, v| k <= 3 && v.len() > 3);
 
-        assert_eq!(cache.len(), 1);
-        assert!(!cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(!cache.contains_key(&4));
-        assert!(!cache.contains_key(&5));
+        assert_eq!(cache.into_iter().collect::<Vec<_>>(), [(3, "three")]);
     }
 
     #[test]
@@ -1095,10 +1349,10 @@ mod tests {
 
         cache.retain(|_, _| true);
 
-        assert_eq!(cache.len(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (2, "two"), (3, "three")]
+        );
     }
 
     #[test]
@@ -1111,11 +1365,7 @@ mod tests {
 
         cache.retain(|_, _| false);
 
-        assert_eq!(cache.len(), 0);
-        assert!(cache.is_empty());
-        assert!(!cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(!cache.contains_key(&3));
+        assert_eq!(cache.into_iter().collect::<Vec<_>>(), vec![]);
     }
 
     #[test]
@@ -1143,30 +1393,6 @@ mod tests {
 
         assert_eq!(cache.len(), 0);
         assert!(!cache.contains_key(&1));
-    }
-
-    #[test]
-    fn test_lfu_retain_with_heap_property_maintenance() {
-        let mut cache = Lfu::new(NonZeroUsize::new(10).unwrap());
-
-        for i in 1..=10 {
-            cache.insert(i, format!("value_{}", i));
-
-            for _ in 0..i {
-                cache.get(&i);
-            }
-        }
-
-        cache.retain(|&k, _| k % 2 == 1);
-
-        assert_eq!(cache.len(), 5);
-        for i in 1..=10 {
-            if i % 2 == 1 {
-                assert!(cache.contains_key(&i));
-            } else {
-                assert!(!cache.contains_key(&i));
-            }
-        }
     }
 
     #[test]
@@ -1210,77 +1436,22 @@ mod tests {
     fn test_lfu_retain_with_mutable_values() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
-        cache.insert(1, String::from("short"));
-        cache.insert(2, String::from("medium"));
-        cache.insert(3, String::from("very_long_string"));
-        cache.insert(4, String::from("tiny"));
-        cache.insert(5, String::from("another_long_string"));
+        cache.insert(1, "short".to_string());
+        cache.insert(2, "medium".to_string());
+        cache.insert(3, "very_long_string".to_string());
+        cache.insert(4, "tiny".to_string());
+        cache.insert(5, "another_long_string".to_string());
 
         cache.retain(|_, v| v.len() > 5);
 
-        assert_eq!(cache.len(), 3);
-        assert!(!cache.contains_key(&1));
-        assert!(cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(!cache.contains_key(&4));
-        assert!(cache.contains_key(&5));
-    }
-
-    #[test]
-    fn test_lfu_retain_complex_predicate() {
-        let mut cache = Lfu::new(NonZeroUsize::new(6).unwrap());
-
-        cache.insert(1, 10);
-        cache.insert(2, 25);
-        cache.insert(3, 30);
-        cache.insert(4, 45);
-        cache.insert(5, 50);
-        cache.insert(6, 65);
-
-        cache.get(&1);
-        cache.get(&1);
-        cache.get(&3);
-        cache.get(&5);
-        cache.get(&5);
-        cache.get(&5);
-
-        cache.retain(|&k, &mut v| k % 2 == 1 && v % 5 == 0);
-
-        assert_eq!(cache.len(), 3);
-        assert!(cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(!cache.contains_key(&4));
-        assert!(cache.contains_key(&5));
-        assert!(!cache.contains_key(&6));
-    }
-
-    #[test]
-    fn test_lfu_retain_stress_test() {
-        let mut cache = Lfu::new(NonZeroUsize::new(100).unwrap());
-
-        for i in 0..100 {
-            cache.insert(i, i * 10);
-
-            for _ in 0..(i % 5) {
-                cache.get(&i);
-            }
-        }
-
-        assert_eq!(cache.len(), 100);
-
-        cache.retain(|&k, _| k % 3 == 0);
-
-        let expected_len = (0..100).filter(|&x| x % 3 == 0).count();
-        assert_eq!(cache.len(), expected_len);
-
-        for i in 0..100 {
-            if i % 3 == 0 {
-                assert!(cache.contains_key(&i));
-            } else {
-                assert!(!cache.contains_key(&i));
-            }
-        }
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [
+                (2, "medium".to_string()),
+                (3, "very_long_string".to_string()),
+                (5, "another_long_string".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -1302,15 +1473,441 @@ mod tests {
 
         cache.retain(|&k, _| k > 2);
 
-        assert_eq!(cache.len(), 3);
-        assert!(!cache.contains_key(&1));
-        assert!(!cache.contains_key(&2));
-        assert!(cache.contains_key(&3));
-        assert!(cache.contains_key(&4));
-        assert!(cache.contains_key(&5));
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(5, "five"), (3, "three"), (4, "four")]
+        );
+    }
 
-        cache.insert(6, "six");
+    #[test]
+    fn test_lfu_iter_empty_cache() {
+        let cache = Lfu::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+        let items: Vec<_> = cache.iter().collect();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_lfu_iter_single_item() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one");
+
+        let items: Vec<_> = cache.iter().collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], (&1, &"one"));
+    }
+
+    #[test]
+    fn test_lfu_iter_eviction_order() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (2, "two"), (3, "three")]
+        );
+    }
+
+    #[test]
+    fn test_lfu_iter_with_different_frequencies() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        cache.get(&1);
+        cache.get(&2);
+        cache.get(&2);
+
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (1, "one"), (2, "two")]
+        );
+    }
+
+    #[test]
+    fn test_lfu_iter_complex_frequency_pattern() {
+        let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+        cache.insert(4, "four");
+
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&1);
+
+        cache.get(&2);
+
         cache.get(&3);
-        assert_eq!(cache.len(), 4);
+        cache.get(&3);
+
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(4, "four"), (2, "two"), (3, "three"), (1, "one")]
+        );
+    }
+
+    #[test]
+    fn test_lfu_iter_same_frequency_order() {
+        let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+        cache.insert(4, "four");
+
+        cache.get(&1);
+        cache.get(&2);
+        cache.get(&3);
+        cache.get(&4);
+
+        let items: Vec<_> = cache.iter().collect();
+        assert_eq!(
+            items,
+            [(&1, &"one"), (&2, &"two"), (&3, &"three"), (&4, &"four")]
+        );
+    }
+
+    #[test]
+    fn test_lfu_iter_after_eviction() {
+        let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+
+        cache.get(&2);
+
+        cache.insert(3, "three");
+
+        assert_eq!(
+            cache.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (2, "two")]
+        );
+    }
+
+    #[test]
+    fn test_lfu_iter_consistency_with_tail() {
+        let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
+
+        cache.insert(10, "ten");
+        cache.insert(20, "twenty");
+        cache.insert(30, "thirty");
+        cache.insert(40, "forty");
+
+        cache.get(&20);
+        cache.get(&30);
+        cache.get(&30);
+
+        let tail = cache.tail();
+        let mut iter_items = cache.iter();
+        let first_iter_item = iter_items.next();
+
+        assert_eq!(tail, first_iter_item);
+    }
+
+    #[test]
+    fn test_lfu_iter_multiple_iterations() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        cache.get(&1);
+        cache.get(&1);
+
+        let items1: Vec<_> = cache.iter().collect();
+        let items2: Vec<_> = cache.iter().collect();
+
+        assert_eq!(items1, items2);
+    }
+
+    #[test]
+    fn test_lfu_iter_after_remove() {
+        let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+        cache.insert(4, "four");
+
+        cache.get(&2);
+        cache.get(&2);
+        cache.get(&3);
+
+        cache.remove(&3);
+
+        let items: Vec<_> = cache.iter().collect();
+        assert_eq!(items, [(&1, &"one"), (&4, &"four"), (&2, &"two")]);
+    }
+
+    #[test]
+    fn test_lfu_iter_frequency_bucket_ordering() {
+        let mut cache = Lfu::new(NonZeroUsize::new(6).unwrap());
+
+        for i in 1..=6 {
+            cache.insert(i, format!("value_{}", i));
+        }
+
+        for _ in 0..3 {
+            cache.get(&1);
+            cache.get(&2);
+        }
+
+        for _ in 0..2 {
+            cache.get(&3);
+            cache.get(&4);
+        }
+
+        cache.get(&5);
+        cache.get(&6);
+
+        let items: Vec<_> = cache.iter().collect();
+        assert_eq!(
+            items,
+            [
+                (&5, &"value_5".to_string()),
+                (&6, &"value_6".to_string()),
+                (&3, &"value_3".to_string()),
+                (&4, &"value_4".to_string()),
+                (&1, &"value_1".to_string()),
+                (&2, &"value_2".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lfu_iter_with_updates() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        cache.get(&1);
+
+        *cache.get_mut(&1).unwrap() = "updated_one";
+
+        let items: Vec<_> = cache.iter().collect();
+        assert_eq!(items, [(&2, &"two"), (&3, &"three"), (&1, &"updated_one")]);
+    }
+
+    #[test]
+    fn into_iter_matches_iter() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        let items: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+        let into_items: Vec<_> = cache.into_iter().collect();
+
+        assert_eq!(items, into_items);
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_no_modification() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", vec![1, 2, 3]);
+        cache.insert("B", vec![4, 5, 6]);
+        cache.insert("C", vec![7, 8, 9]);
+
+        let original_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+
+        if let Some(entry) = cache.peek_mut(&"A") {
+            let _len = entry.len();
+        }
+
+        let new_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+        assert_eq!(original_order, new_order);
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_with_modification() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", vec![1, 2, 3]);
+        cache.insert("B", vec![4, 5, 6]);
+        cache.insert("C", vec![7, 8, 9]);
+
+        assert_eq!(cache.tail().unwrap().0, &"A");
+
+        if let Some(mut entry) = cache.peek_mut(&"A") {
+            entry.push(4);
+        }
+
+        assert_eq!(cache.peek(&"A"), Some(&vec![1, 2, 3, 4]));
+        assert_eq!(cache.tail().unwrap().0, &"B");
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_nonexistent_key() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+
+        assert!(cache.peek_mut(&3).is_none());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_empty_cache() {
+        let mut cache = Lfu::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+        assert!(cache.peek_mut(&1).is_none());
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_single_item() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str("_modified");
+        }
+
+        assert_eq!(cache.peek(&1), Some(&"one_modified".to_string()));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_frequency_updates() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&2);
+
+        assert_eq!(cache.tail().unwrap().0, &3);
+
+        if let Some(mut entry) = cache.peek_mut(&3) {
+            *entry += 100;
+        }
+
+        assert_eq!(cache.peek(&3), Some(&130));
+        assert_eq!(cache.tail().unwrap().0, &2);
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_with_eviction() {
+        let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            *entry += 5;
+        }
+
+        cache.insert(3, 30);
+
+        assert_eq!(cache.peek(&1), Some(&15));
+        assert!(cache.peek(&2).is_none());
+        assert_eq!(cache.peek(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_preserve_frequency_on_no_modification() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&2);
+
+        let original_tail = cache.tail().map(|(k, _)| *k);
+
+        if let Some(entry) = cache.peek_mut(&3) {
+            let _value = *entry;
+        }
+
+        let new_tail = cache.tail().map(|(k, _)| *k);
+        assert_eq!(original_tail, new_tail);
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_multiple_modifications() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "hello".to_string());
+        cache.insert(2, "world".to_string());
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str(" there");
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str(" friend");
+        }
+
+        assert_eq!(cache.peek(&1), Some(&"hello there friend".to_string()));
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_ordering_consistency() {
+        let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
+        cache.insert(1, 100);
+        cache.insert(2, 200);
+        cache.insert(3, 300);
+        cache.insert(4, 400);
+
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&1);
+        cache.get(&3);
+        cache.get(&3);
+        cache.get(&3);
+        cache.get(&4);
+        cache.get(&4);
+
+        let expected: Vec<_> = cache
+            .iter()
+            .map(|(k, v)| (*k, if *k != 2 { *v } else { *v + 1000 }))
+            .collect();
+
+        if let Some(mut entry) = cache.peek_mut(&2) {
+            *entry += 1000;
+        }
+
+        let after_modification: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+
+        assert_eq!(expected, after_modification);
+
+        assert_eq!(cache.peek(&2), Some(&1200));
+    }
+
+    #[test]
+    fn test_lfu_peek_mut_complex_scenario() {
+        let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("low", 1);
+        cache.insert("medium", 2);
+        cache.insert("high", 3);
+
+        cache.get(&"medium");
+        cache.get(&"high");
+        cache.get(&"high");
+
+        assert_eq!(cache.tail().unwrap().0, &"low");
+
+        if let Some(mut entry) = cache.peek_mut(&"low") {
+            *entry += 100;
+        }
+
+        assert_eq!(cache.peek(&"low"), Some(&101));
+        assert_eq!(cache.tail().unwrap().0, &"medium");
+
+        cache.insert("new", 4);
+
+        assert!(cache.contains_key(&"low"));
+        assert!(!cache.contains_key(&"medium"));
+        assert!(cache.contains_key(&"high"));
+        assert!(cache.contains_key(&"new"));
     }
 }

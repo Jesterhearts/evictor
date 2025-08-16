@@ -1,0 +1,25 @@
+[package]
+name    = "evictor-fuzz"
+version = "0.1.0"
+publish = false
+edition = "2024"
+
+[profile.release]
+debug = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+arbitrary     = { version = "1.4.2", features = [ "derive" ] }
+
+[dependencies.evictor]
+path = ".."
+
+[[bin]]
+name  = "fuzz_all"
+path  = "fuzz_targets/fuzz_all.rs"
+test  = false
+doc   = false
+bench = false

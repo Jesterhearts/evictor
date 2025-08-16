@@ -1,8 +1,3 @@
-//! Least Recently Used (LRU) cache implementation.
-//!
-//! This module provides the LRU eviction policy, which removes the least
-//! recently accessed entry when the cache reaches capacity.
-
 use std::hash::Hash;
 
 use indexmap::IndexMap;
@@ -13,16 +8,15 @@ use crate::{
     Policy,
     RandomState,
     private,
+    utils::swap_remove_ll_entry,
 };
 
-/// LRU cache eviction policy implementation.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct LruPolicy;
 
 impl private::Sealed for LruPolicy {}
 
-/// LRU cache entry containing value and linked list pointers.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct LruEntry<T> {
@@ -42,11 +36,6 @@ impl<T> EntryValue<T> for LruEntry<T> {
         }
     }
 
-    fn prepare_for_reinsert(&mut self) {
-        self.next = None;
-        self.prev = None;
-    }
-
     fn into_value(self) -> T {
         self.value
     }
@@ -60,7 +49,6 @@ impl<T> EntryValue<T> for LruEntry<T> {
     }
 }
 
-/// Metadata for LRU policy tracking head, tail, and aging counter.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 #[derive(Default)]
@@ -79,18 +67,18 @@ impl Metadata for LruMetadata {
 
 impl<T> Policy<T> for LruPolicy {
     type EntryType = LruEntry<T>;
+    type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = LruMetadata;
 
-    fn touch_entry(
+    fn touch_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<impl Hash + Eq, Self::EntryType, RandomState>,
+        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
         }
 
-        // Move the accessed entry to the head of the queue
         let old_head = metadata.head;
         if old_head == index {
             return index;
@@ -122,74 +110,99 @@ impl<T> Policy<T> for LruPolicy {
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> (usize, Option<(K, Self::EntryType)>) {
-        if index >= queue.len() {
-            return (index, None);
-        }
+    ) -> Option<(K, Self::EntryType)> {
+        swap_remove_ll_entry!(index, metadata, queue)
+    }
 
-        if queue.len() == 1 {
-            // If there's only one entry, just remove it
-            return (index, queue.swap_remove_index(index));
+    fn iter<'q, K>(
+        metadata: &'q Self::MetadataType,
+        queue: &'q IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (&'q K, &'q T)>
+    where
+        T: 'q,
+    {
+        Iter {
+            queue,
+            index: Some(metadata.tail),
         }
+    }
 
-        let (k, e) = queue.swap_remove_index(index).unwrap();
-        if queue.len() == 1 {
-            metadata.head = 0;
-            metadata.tail = 0;
-            queue[0].prev = None;
-            queue[0].next = None;
-            return (index, Some((k, e)));
+    fn into_iter<K>(
+        metadata: Self::MetadataType,
+        queue: IndexMap<K, Self::EntryType, RandomState>,
+    ) -> IntoIter<K, T> {
+        IntoIter {
+            queue: queue.into_iter().map(Some).collect(),
+            index: Some(metadata.tail),
         }
+    }
 
-        if index == metadata.head {
-            // Head was removed, update it
-            metadata.head = e.prev.unwrap_or_default();
+    fn into_entries<K>(
+        metadata: Self::MetadataType,
+        queue: IndexMap<K, Self::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        IntoEntriesIter {
+            queue: queue.into_iter().map(Some).collect(),
+            index: Some(metadata.tail),
         }
-        if metadata.head == queue.len() {
-            // Head was pointing to the perturbed index
-            metadata.head = index;
-        }
+    }
+}
 
-        if index == metadata.tail {
-            metadata.tail = e.next.unwrap_or_default();
-        }
-        if metadata.tail == queue.len() {
-            // Tail was pointing to the perturbed index
-            metadata.tail = index;
-        }
+struct Iter<'q, K, T> {
+    queue: &'q IndexMap<K, LruEntry<T>, RandomState>,
+    index: Option<usize>,
+}
 
-        // Unlink the entry from the queue
-        if let Some(prev) = e.prev {
-            if prev == queue.len() {
-                queue[index].next = None;
-            } else {
-                queue[prev].next = e.next;
-            }
-        }
-        if let Some(next) = e.next {
-            if next == queue.len() {
-                queue[index].prev = None;
-            } else {
-                queue[next].prev = e.prev;
-            }
-        }
+impl<'q, K, T> Iterator for Iter<'q, K, T> {
+    type Item = (&'q K, &'q T);
 
-        if index == queue.len() {
-            return (index, Some((k, e)));
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_index(index)?;
+            self.index = entry.next;
+            Some((key, entry.value()))
+        } else {
+            None
         }
+    }
+}
 
-        // Update the links for the moved entry
-        if let Some(next) = queue[index].next {
-            debug_assert_eq!(queue[next].prev, Some(queue.len()));
-            queue[next].prev = Some(index);
+#[doc(hidden)]
+pub struct IntoIter<K, T> {
+    queue: Vec<Option<(K, LruEntry<T>)>>,
+    index: Option<usize>,
+}
+
+impl<K, T> Iterator for IntoIter<K, T> {
+    type Item = (K, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_mut(index)?.take()?;
+            self.index = entry.next;
+            Some((key, entry.into_value()))
+        } else {
+            None
         }
+    }
+}
 
-        if let Some(prev) = queue[index].prev {
-            debug_assert_eq!(queue[prev].next, Some(queue.len()));
-            queue[prev].next = Some(index);
+struct IntoEntriesIter<K, T> {
+    queue: Vec<Option<(K, LruEntry<T>)>>,
+    index: Option<usize>,
+}
+
+impl<K, T> Iterator for IntoEntriesIter<K, T> {
+    type Item = (K, LruEntry<T>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.index {
+            let (key, entry) = self.queue.get_mut(index)?.take()?;
+            self.index = entry.next;
+            Some((key, entry))
+        } else {
+            None
         }
-
-        (index, Some((k, e)))
     }
 }
 
@@ -240,10 +253,10 @@ mod tests {
 
         lru.insert(4, 40);
 
-        assert_eq!(lru.get(&1), None);
-        assert_eq!(lru.get(&2), Some(&20));
-        assert_eq!(lru.get(&3), Some(&30));
-        assert_eq!(lru.get(&4), Some(&40));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(2, 20), (3, 30), (4, 40)]
+        );
     }
 
     #[test]
@@ -258,10 +271,10 @@ mod tests {
 
         lru.insert(4, 40);
 
-        assert_eq!(lru.get(&1), Some(&10));
-        assert_eq!(lru.get(&2), None);
-        assert_eq!(lru.get(&3), Some(&30));
-        assert_eq!(lru.get(&4), Some(&40));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(3, 30), (1, 10), (4, 40)]
+        );
     }
 
     #[test]
@@ -277,9 +290,7 @@ mod tests {
 
         lru.insert(3, 30);
 
-        assert_eq!(lru.get(&1), Some(&10));
-        assert_eq!(lru.get(&2), None);
-        assert_eq!(lru.get(&3), Some(&30));
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(1, 10), (3, 30)]);
     }
 
     #[test]
@@ -330,11 +341,10 @@ mod tests {
 
         lru.insert(5, 50);
 
-        assert_eq!(lru.get(&1), Some(&10));
-        assert_eq!(lru.get(&2), Some(&20));
-        assert_eq!(lru.get(&3), Some(&30));
-        assert_eq!(lru.get(&4), None);
-        assert_eq!(lru.get(&5), Some(&50));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(2, 20), (1, 10), (3, 30), (5, 50)]
+        );
     }
 
     #[test]
@@ -348,10 +358,10 @@ mod tests {
         lru.get(&2);
         lru.insert(4, 40);
 
-        assert_eq!(lru.get(&1), None);
-        assert_eq!(lru.get(&2), Some(&20));
-        assert_eq!(lru.get(&3), Some(&30));
-        assert_eq!(lru.get(&4), Some(&40));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(3, 30), (2, 20), (4, 40)]
+        );
     }
 
     #[test]
@@ -366,9 +376,7 @@ mod tests {
         let value = lru.get_or_insert_with(3, |_| 30);
         assert_eq!(value, &30);
 
-        assert_eq!(lru.get(&1), Some(&10));
-        assert_eq!(lru.get(&2), None);
-        assert_eq!(lru.get(&3), Some(&30));
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(1, 10), (3, 30)]);
     }
 
     #[test]
@@ -384,10 +392,10 @@ mod tests {
 
         lru.insert(4, 40);
 
-        assert_eq!(lru.get(&1), Some(&10));
-        assert_eq!(lru.get(&2), None);
-        assert_eq!(lru.get(&3), Some(&30));
-        assert_eq!(lru.get(&4), Some(&40));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(3, 30), (1, 10), (4, 40)]
+        );
     }
 
     #[test]
@@ -398,11 +406,10 @@ mod tests {
             lru.insert(i, i * 10);
         }
 
-        assert_eq!(lru.get(&8), Some(&80));
-        assert_eq!(lru.get(&9), Some(&90));
-        assert_eq!(lru.get(&10), Some(&100));
-        assert_eq!(lru.get(&7), None);
-        assert_eq!(lru.get(&1), None);
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(8, 80), (9, 90), (10, 100)]
+        );
     }
 
     #[test]
@@ -418,9 +425,7 @@ mod tests {
 
         lru.insert(3, 30);
 
-        assert_eq!(lru.get(&1), Some(&10));
-        assert_eq!(lru.get(&2), None);
-        assert_eq!(lru.get(&3), Some(&30));
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(1, 10), (3, 30)]);
     }
 
     #[test]
@@ -482,9 +487,8 @@ mod tests {
         assert!(lru.contains_key(&2));
 
         lru.insert(3, 30);
-        assert!(!lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
+
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(2, 20), (3, 30)]);
     }
 
     #[test]
@@ -505,9 +509,11 @@ mod tests {
 
         lru.insert(4, 40);
         assert_eq!(lru.len(), 3);
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, 10), (3, 30), (4, 40)]
+        );
     }
 
     #[test]
@@ -533,6 +539,9 @@ mod tests {
 
         let popped = lru.pop();
         assert_eq!(popped, None);
+
+        // Test empty cache ordering
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
@@ -569,10 +578,9 @@ mod tests {
         assert_eq!(lru.len(), 0);
         assert!(lru.is_empty());
         assert_eq!(lru.capacity(), 3);
-        assert!(!lru.contains_key(&1));
-        assert!(!lru.contains_key(&2));
-        assert!(!lru.contains_key(&3));
         assert!(lru.tail().is_none());
+
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
@@ -589,9 +597,13 @@ mod tests {
 
         lru.insert(3, String::from("new"));
 
-        assert!(lru.contains_key(&1));
-        assert!(!lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [
+                (1, String::from("hello modified")),
+                (3, String::from("new"))
+            ]
+        );
     }
 
     #[test]
@@ -634,10 +646,11 @@ mod tests {
         lru.extend(items);
 
         assert_eq!(lru.len(), 4);
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, 10), (2, 20), (3, 30), (4, 40)]
+        );
     }
 
     #[test]
@@ -647,9 +660,11 @@ mod tests {
 
         assert_eq!(lru.len(), 3);
         assert_eq!(lru.capacity(), 3);
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, 10), (2, 20), (3, 30)]
+        );
     }
 
     #[test]
@@ -660,9 +675,10 @@ mod tests {
         assert_eq!(lru.len(), 5);
         assert_eq!(lru.capacity(), 5);
 
-        for i in 1..=5 {
-            assert!(lru.contains_key(&i));
-        }
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]
+        );
     }
 
     #[test]
@@ -674,8 +690,8 @@ mod tests {
         lru.shrink_to_fit();
 
         assert_eq!(lru.len(), 2);
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
+
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(1, 10), (2, 20)]);
     }
 
     #[test]
@@ -692,20 +708,12 @@ mod tests {
         lru.get(&2);
 
         lru.insert(5, "fifth");
-
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
-        assert!(!lru.contains_key(&4));
-        assert!(lru.contains_key(&5));
-
         lru.insert(6, "sixth");
 
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(!lru.contains_key(&3));
-        assert!(lru.contains_key(&5));
-        assert!(lru.contains_key(&6));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, "first"), (2, "second"), (5, "fifth"), (6, "sixth")]
+        );
     }
 
     #[test]
@@ -726,6 +734,8 @@ mod tests {
         }
 
         assert!(lru.len() <= 10);
+
+        // Verify that recent items are still present
         for i in 15..20 {
             assert!(lru.contains_key(&i));
         }
@@ -827,14 +837,17 @@ mod tests {
         assert_eq!(lru.len(), 6);
         assert_eq!(lru.capacity(), 6);
 
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
-        assert!(lru.contains_key(&5));
-        assert!(lru.contains_key(&6));
-
-        assert_eq!(lru.peek(&1), Some(&"updated_one"));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [
+                (2, "two"),
+                (3, "three"),
+                (4, "four"),
+                (5, "five"),
+                (1, "updated_one"),
+                (6, "six")
+            ]
+        );
     }
 
     #[test]
@@ -873,11 +886,11 @@ mod tests {
         lru.retain(|&k, _| k % 2 == 0);
 
         assert_eq!(lru.len(), 2);
-        assert!(!lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(!lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
-        assert!(!lru.contains_key(&5));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(2, "two"), (4, "four")]
+        );
     }
 
     #[test]
@@ -897,11 +910,8 @@ mod tests {
         lru.retain(|&k, v| k <= 3 && v.len() > 3);
 
         assert_eq!(lru.len(), 1);
-        assert!(!lru.contains_key(&1));
-        assert!(!lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
-        assert!(!lru.contains_key(&4));
-        assert!(!lru.contains_key(&5));
+
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(3, "three")]);
     }
 
     #[test]
@@ -915,9 +925,11 @@ mod tests {
         lru.retain(|_, _| true);
 
         assert_eq!(lru.len(), 3);
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (2, "two"), (3, "three")]
+        );
     }
 
     #[test]
@@ -932,9 +944,8 @@ mod tests {
 
         assert_eq!(lru.len(), 0);
         assert!(lru.is_empty());
-        assert!(!lru.contains_key(&1));
-        assert!(!lru.contains_key(&2));
-        assert!(!lru.contains_key(&3));
+
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
@@ -961,7 +972,7 @@ mod tests {
         lru.retain(|&k, _| k != 1);
 
         assert_eq!(lru.len(), 0);
-        assert!(!lru.contains_key(&1));
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), []);
     }
 
     #[test]
@@ -988,12 +999,16 @@ mod tests {
         lru.insert(6, "six");
         lru.insert(7, "seven");
 
-        assert!(!lru.contains_key(&1));
-        assert!(lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
-        assert!(lru.contains_key(&5));
-        assert!(lru.contains_key(&6));
-        assert!(lru.contains_key(&7));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [
+                (3, "three"),
+                (4, "four"),
+                (5, "five"),
+                (6, "six"),
+                (7, "seven")
+            ]
+        );
     }
 
     #[test]
@@ -1009,11 +1024,15 @@ mod tests {
         lru.retain(|_, v| v.len() > 5);
 
         assert_eq!(lru.len(), 3);
-        assert!(!lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
-        assert!(!lru.contains_key(&4));
-        assert!(lru.contains_key(&5));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [
+                (2, String::from("medium")),
+                (3, String::from("very_long_string")),
+                (5, String::from("another_long_string"))
+            ]
+        );
     }
 
     #[test]
@@ -1035,13 +1054,11 @@ mod tests {
         let expected_len = (0..100).filter(|&x| x % 3 == 0).count();
         assert_eq!(lru.len(), expected_len);
 
-        for i in 0..100 {
-            if i % 3 == 0 {
-                assert!(lru.contains_key(&i));
-            } else {
-                assert!(!lru.contains_key(&i));
-            }
-        }
+        let expected_keys: Vec<_> = (0..100)
+            .filter(|&x| x % 3 == 0)
+            .map(|x| (x, x * 10))
+            .collect();
+        assert_eq!(lru.into_iter().collect::<Vec<_>>(), expected_keys);
     }
 
     #[test]
@@ -1064,15 +1081,15 @@ mod tests {
         lru.retain(|&k, _| k > 2);
 
         assert_eq!(lru.len(), 3);
-        assert!(!lru.contains_key(&1));
-        assert!(!lru.contains_key(&2));
-        assert!(lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
-        assert!(lru.contains_key(&5));
 
         lru.insert(6, "six");
         lru.get(&3);
         assert_eq!(lru.len(), 4);
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(5, "five"), (4, "four"), (6, "six"), (3, "three")]
+        );
     }
 
     #[test]
@@ -1090,16 +1107,21 @@ mod tests {
         lru.retain(|&k, _| k % 2 == 0);
 
         assert_eq!(lru.len(), 5);
-        for i in 1..=10 {
-            if i % 2 == 0 {
-                assert!(lru.contains_key(&i));
-            } else {
-                assert!(!lru.contains_key(&i));
-            }
-        }
 
         lru.insert(11, "new_item".to_string());
         assert_eq!(lru.len(), 6);
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [
+                (2, "value_2".to_string()),
+                (4, "value_4".to_string()),
+                (6, "value_6".to_string()),
+                (8, "value_8".to_string()),
+                (10, "value_10".to_string()),
+                (11, "new_item".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -1120,12 +1142,12 @@ mod tests {
         lru.retain(|&k, _| k != 3);
 
         assert_eq!(lru.len(), 3);
-        assert!(lru.contains_key(&1));
-        assert!(lru.contains_key(&2));
-        assert!(!lru.contains_key(&3));
-        assert!(lru.contains_key(&4));
-
         assert_eq!(lru.tail(), Some((&2, &"two")));
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(2, "two"), (4, "four"), (1, "one")]
+        );
     }
 
     #[test]
@@ -1140,26 +1162,426 @@ mod tests {
         lru.get(&4);
         lru.get(&6);
 
+        let before_retain: Vec<_> = lru
+            .iter()
+            .filter_map(|(k, v)| (k % 2 == 0).then_some((*k, *v)))
+            .collect();
+
         lru.retain(|&k, _| k % 2 == 0);
 
         assert_eq!(lru.len(), 3);
-        assert!(lru.contains_key(&2));
-        assert!(lru.contains_key(&4));
-        assert!(lru.contains_key(&6));
-
         assert_eq!(lru.tail(), Some((&2, &20)));
+        assert_eq!(
+            lru.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            before_retain,
+        );
 
         lru.insert(8, 80);
         lru.insert(10, 100);
         lru.insert(12, 120);
         lru.insert(14, 140);
 
-        assert!(!lru.contains_key(&2));
-        assert!(lru.contains_key(&4));
-        assert!(lru.contains_key(&6));
-        assert!(lru.contains_key(&8));
-        assert!(lru.contains_key(&10));
-        assert!(lru.contains_key(&12));
-        assert!(lru.contains_key(&14));
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(4, 40), (6, 60), (8, 80), (10, 100), (12, 120), (14, 140)]
+        );
+    }
+
+    #[test]
+    fn test_lru_iter_empty_cache() {
+        let lru = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+        let items: Vec<_> = lru.iter().collect();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_lru_iter_single_item() {
+        let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
+        lru.insert(1, "one");
+
+        let items: Vec<_> = lru.iter().collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], (&1, &"one"));
+    }
+
+    #[test]
+    fn test_lru_iter_eviction_order() {
+        let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(1, "one"), (2, "two"), (3, "three")]
+        );
+    }
+
+    #[test]
+    fn test_lru_iter_after_access() {
+        let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+
+        lru.get(&1);
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(2, "two"), (3, "three"), (1, "one")]
+        );
+    }
+
+    #[test]
+    fn test_lru_iter_complex_access_pattern() {
+        let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+        lru.insert(4, "four");
+
+        lru.get(&2);
+        lru.get(&4);
+        lru.get(&1);
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(3, "three"), (2, "two"), (4, "four"), (1, "one")]
+        );
+    }
+
+    #[test]
+    fn test_lru_iter_after_update() {
+        let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+
+        *lru.get_mut(&1).unwrap() = "updated_one";
+
+        let items: Vec<_> = lru.iter().collect();
+        assert_eq!(items, [(&2, &"two"), (&3, &"three"), (&1, &"updated_one")]);
+    }
+
+    #[test]
+    fn test_lru_iter_with_eviction() {
+        let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+
+        assert_eq!(
+            lru.into_iter().collect::<Vec<_>>(),
+            [(2, "two"), (3, "three")]
+        );
+    }
+
+    #[test]
+    fn test_lru_iter_consistency_with_tail() {
+        let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
+
+        lru.insert(10, "ten");
+        lru.insert(20, "twenty");
+        lru.insert(30, "thirty");
+        lru.insert(40, "forty");
+
+        lru.get(&20);
+        lru.get(&30);
+
+        let tail = lru.tail();
+        let mut iter_items = lru.iter();
+        let first_iter_item = iter_items.next();
+
+        assert_eq!(tail, first_iter_item);
+    }
+
+    #[test]
+    fn test_lru_iter_multiple_iterations() {
+        let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+
+        let items1: Vec<_> = lru.iter().collect();
+        let items2: Vec<_> = lru.iter().collect();
+
+        assert_eq!(items1, items2);
+        assert_eq!(items1.len(), 3);
+    }
+
+    #[test]
+    fn test_lru_iter_after_remove() {
+        let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
+
+        lru.insert(1, "one");
+        lru.insert(2, "two");
+        lru.insert(3, "three");
+        lru.insert(4, "four");
+
+        lru.get(&2);
+        lru.remove(&3);
+
+        let items: Vec<_> = lru.iter().collect();
+        assert_eq!(items, [(&1, &"one"), (&4, &"four"), (&2, &"two")]);
+    }
+
+    #[test]
+    fn into_iter_matches_iter() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+        cache.insert(3, "three");
+
+        let items: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+        let into_items: Vec<_> = cache.into_iter().collect();
+
+        assert_eq!(items, into_items);
+    }
+
+    #[test]
+    fn test_lru_peek_mut_no_modification() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", vec![1, 2, 3]);
+        cache.insert("B", vec![4, 5, 6]);
+        cache.insert("C", vec![7, 8, 9]);
+
+        let original_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+
+        if let Some(entry) = cache.peek_mut(&"A") {
+            let _len = entry.len();
+        }
+
+        let new_order: Vec<_> = cache.iter().map(|(k, _)| *k).collect();
+        assert_eq!(original_order, new_order);
+    }
+
+    #[test]
+    fn test_lru_peek_mut_with_modification() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", vec![1, 2, 3]);
+        cache.insert("B", vec![4, 5, 6]);
+        cache.insert("C", vec![7, 8, 9]);
+
+        assert_eq!(cache.tail().unwrap().0, &"A");
+
+        if let Some(mut entry) = cache.peek_mut(&"A") {
+            entry.push(4);
+        }
+
+        assert_eq!(cache.peek(&"A"), Some(&vec![1, 2, 3, 4]));
+        assert_eq!(cache.tail().unwrap().0, &"B");
+    }
+
+    #[test]
+    fn test_lru_peek_mut_nonexistent_key() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one");
+        cache.insert(2, "two");
+
+        assert!(cache.peek_mut(&3).is_none());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_lru_peek_mut_empty_cache() {
+        let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+        assert!(cache.peek_mut(&1).is_none());
+    }
+
+    #[test]
+    fn test_lru_peek_mut_single_item() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str("_modified");
+        }
+
+        assert_eq!(cache.peek(&1), Some(&"one_modified".to_string()));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.tail().unwrap().0, &1);
+    }
+
+    #[test]
+    fn test_lru_peek_mut_with_eviction() {
+        let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+
+        assert_eq!(cache.tail().unwrap().0, &1);
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            *entry += 5;
+        }
+
+        assert_eq!(cache.tail().unwrap().0, &2);
+
+        cache.insert(3, 30);
+
+        assert_eq!(cache.peek(&1), Some(&15));
+        assert!(cache.peek(&2).is_none());
+        assert_eq!(cache.peek(&3), Some(&30));
+    }
+
+    #[test]
+    fn test_lru_peek_mut_preserve_order_on_no_modification() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        cache.get(&1);
+
+        let original_tail = cache.tail().map(|(k, _)| *k);
+
+        if let Some(entry) = cache.peek_mut(&2) {
+            let _value = *entry;
+        }
+
+        let new_tail = cache.tail().map(|(k, _)| *k);
+        assert_eq!(original_tail, new_tail);
+    }
+
+    #[test]
+    fn test_lru_peek_mut_multiple_modifications() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "hello".to_string());
+        cache.insert(2, "world".to_string());
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str(" there");
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            entry.push_str(" friend");
+        }
+
+        assert_eq!(cache.peek(&1), Some(&"hello there friend".to_string()));
+    }
+
+    #[test]
+    fn test_lru_peek_mut_ordering_consistency() {
+        let mut cache = Lru::new(NonZeroUsize::new(4).unwrap());
+        cache.insert(1, 100);
+        cache.insert(2, 200);
+        cache.insert(3, 300);
+        cache.insert(4, 400);
+
+        cache.get(&2);
+        cache.get(&1);
+
+        let before_modification: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+
+        if let Some(mut entry) = cache.peek_mut(&3) {
+            *entry += 1000;
+        }
+
+        let after_modification: Vec<_> = cache.iter().map(|(k, v)| (*k, *v)).collect();
+
+        assert_ne!(before_modification[0].0, after_modification[0].0);
+        assert_eq!(after_modification[0].0, 4);
+        assert_eq!(cache.peek(&3), Some(&1300));
+    }
+
+    #[test]
+    fn test_lru_peek_mut_complex_scenario() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("first", 1);
+        cache.insert("second", 2);
+        cache.insert("third", 3);
+
+        cache.get(&"first");
+
+        assert_eq!(cache.tail().unwrap().0, &"second");
+
+        if let Some(mut entry) = cache.peek_mut(&"second") {
+            *entry += 100;
+        }
+
+        assert_eq!(cache.peek(&"second"), Some(&102));
+        assert_eq!(cache.tail().unwrap().0, &"third");
+
+        cache.insert("fourth", 4);
+
+        assert!(cache.contains_key(&"second"));
+        assert!(cache.contains_key(&"first"));
+        assert!(!cache.contains_key(&"third"));
+        assert!(cache.contains_key(&"fourth"));
+    }
+
+    #[test]
+    fn test_lru_peek_mut_rapid_succession() {
+        let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(1, vec![1]);
+        cache.insert(2, vec![2]);
+
+        for i in 3..=5 {
+            if let Some(mut entry) = cache.peek_mut(&1) {
+                entry.push(i);
+            }
+        }
+
+        assert_eq!(cache.peek(&1), Some(&vec![1, 3, 4, 5]));
+        assert_eq!(cache.tail().unwrap().0, &2);
+    }
+
+    #[test]
+    fn test_lru_peek_mut_alternating_access() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert("A", 10);
+        cache.insert("B", 20);
+        cache.insert("C", 30);
+
+        if let Some(mut entry) = cache.peek_mut(&"A") {
+            *entry += 1;
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&"B") {
+            *entry += 2;
+        }
+
+        if let Some(mut entry) = cache.peek_mut(&"C") {
+            *entry += 3;
+        }
+
+        assert_eq!(cache.peek(&"A"), Some(&11));
+        assert_eq!(cache.peek(&"B"), Some(&22));
+        assert_eq!(cache.peek(&"C"), Some(&33));
+        assert_eq!(cache.tail().unwrap().0, &"A");
+    }
+
+    #[test]
+    fn test_lru_peek_mut_interaction_with_get() {
+        let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+
+        assert_eq!(cache.tail().unwrap().0, &1);
+
+        if let Some(mut entry) = cache.peek_mut(&1) {
+            *entry += 100;
+        }
+
+        assert_eq!(cache.tail().unwrap().0, &2);
+
+        cache.get(&2);
+
+        assert_eq!(cache.tail().unwrap().0, &3);
+
+        if let Some(mut entry) = cache.peek_mut(&3) {
+            *entry += 200;
+        }
+
+        assert_eq!(cache.tail().unwrap().0, &1);
+        assert_eq!(cache.peek(&1), Some(&110));
+        assert_eq!(cache.peek(&3), Some(&230));
     }
 }
