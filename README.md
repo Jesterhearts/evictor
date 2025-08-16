@@ -9,10 +9,13 @@ Provides several cache implementations with different eviction policies:
 - **LRU (Least Recently Used)** - Evicts the item that was accessed longest ago
 - **MRU (Most Recently Used)** - Evicts the item that was accessed most recently  
 - **LFU (Least Frequently Used)** - Evicts the item that has been accessed least frequently
-- **FIFO (First In, First Out)** - Evicts the item that was inserted earliest, regardless of access patterns
-- **LIFO (Last In, First Out)** - Evicts the item that was inserted most recently, regardless of access patterns
+- **FIFO (First In, First Out)** - Evicts the item that was inserted earliest, regardless of access
+  patterns
+- **LIFO (Last In, First Out)** - Evicts the item that was inserted most recently, regardless of
+  access patterns
+- **Random** - Evicts a randomly selected item when the cache is full
 
-All caches are generic over key and value types, with a configurable capacity. 
+All caches are generic over key and value types, with a configurable capacity.
 
 ## Usage
 
@@ -137,12 +140,38 @@ assert!(cache.contains_key(&1));  // 1 was inserted first, so kept
 assert!(cache.contains_key(&2));  // 2 was inserted second, so kept
 ```
 
-### Creating from Iterator
+### Random Cache
 
-All cache types can be created from iterators. This will set the capacity to the number of items in the iterator:
+Evicts a randomly selected item when the cache is full. Useful as a baseline for comparison with
+other policies or when no particular access pattern can be predicted:
 
 ```rust
-use evictor::{Lru, Mru, Lfu, FiFo, LiFo};
+use std::num::NonZeroUsize;
+use evictor::Random;
+
+let mut cache = Random::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+
+cache.insert(1, "one".to_string());
+cache.insert(2, "two".to_string());
+cache.insert(3, "three".to_string());
+
+// Access entry (doesn't affect eviction order in Random policy)
+cache.get(&1);
+
+// Insert when full evicts a random item
+cache.insert(4, "four".to_string());
+// One of the original entries (1, 2, or 3) was randomly evicted
+assert_eq!(cache.len(), 3);
+assert!(cache.contains_key(&4)); // 4 was just inserted
+```
+
+### Creating from Iterator
+
+All cache types can be created from iterators. This will set the capacity to the number of items in
+the iterator:
+
+```rust
+use evictor::{Lru, Mru, Lfu, FiFo, LiFo, Random};
 
 let items = vec![
     (1, "one".to_string()),
@@ -155,7 +184,8 @@ let lru_cache: Lru<i32, String> = items.clone().into_iter().collect();
 let mru_cache: Mru<i32, String> = items.clone().into_iter().collect();
 let lfu_cache: Lfu<i32, String> = items.clone().into_iter().collect();
 let fifo_cache: FiFo<i32, String> = items.clone().into_iter().collect();
-let lifo_cache: LiFo<i32, String> = items.into_iter().collect();
+let lifo_cache: LiFo<i32, String> = items.clone().into_iter().collect();
+let random_cache: Random<i32, String> = items.into_iter().collect();
 ```
 
 ### Common Operations
@@ -164,7 +194,7 @@ All cache types support the same operations with identical APIs:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::Lru; // Could also use Mru, Lfu, FiFo, or LiFo
+use evictor::Lru; // Could also use Mru, Lfu, FiFo, LiFo, or Random
 
 let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
@@ -193,6 +223,7 @@ cache.clear(); // Remove all entries
 ### Default Features
 
 - `ahash` - Fast hashing using the `ahash` crate (enabled by default)
+- `rand` - Enables the Random cache policy using the `rand` crate.
 
 ## License
 

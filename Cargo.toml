@@ -10,9 +10,19 @@ repository  = "https://github.com/jesterhearts/evictor"
 readme      = "README.md"
 
 [features]
-default = [ "ahash" ]
+default = [ "ahash", "rand" ]
 ahash   = [ "dep:ahash" ]
+rand    = [ "dep:rand" ]
+# Enables the nightly `doc_auto_cfg` feature.
+ENABLE_DOC_AUTO_CFG = [  ]
 
 [dependencies]
 ahash    = { version = "0.8.12", default-features = false, features = [ "std", "compile-time-rng" ], optional = true }
 indexmap = "2.10.0"
+rand     = { version = "0.9.2", optional = true }
+
+[build-dependencies]
+rustc_version = "0.4.1"
+
+[package.metadata.docs.rs]
+all-features = true
