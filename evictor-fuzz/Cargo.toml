@@ -3,6 +3,7 @@ name    = "evictor-fuzz"
 version = "0.1.0"
 publish = false
 edition = "2024"
+readme  = "../README.md"
 
 [profile.release]
 debug = true
@@ -15,11 +16,15 @@ libfuzzer-sys = "0.4.10"
 arbitrary     = { version = "1.4.2", features = [ "derive" ] }
 
 [dependencies.evictor]
-path = ".."
+path = "../evictor"
+
+[lib]
+name = "fuzz_lib"
+path = "fuzz_targets/lib.rs"
 
 [[bin]]
-name  = "fuzz_all"
-path  = "fuzz_targets/fuzz_all.rs"
+name  = "fuzz_lfu"
+path  = "fuzz_targets/fuzz_lfu.rs"
 test  = false
 doc   = false
 bench = false
