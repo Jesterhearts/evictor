@@ -59,7 +59,7 @@ macro_rules! impl_queue_policy {
         impl private::Sealed for $metadata_name {}
 
         impl Metadata for $metadata_name {
-            fn tail_index(&self) -> usize {
+            fn candidate_removal_index(&self) -> usize {
                 self.tail
             }
         }
@@ -70,12 +70,21 @@ macro_rules! impl_queue_policy {
             type MetadataType = $metadata_name;
 
             fn touch_entry<K>(
-                index: usize,
+                mut index: usize,
+                make_room: bool,
                 metadata: &mut Self::MetadataType,
                 queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
             ) -> usize {
                 if index >= queue.len() {
                     return index;
+                }
+
+                if make_room {
+                    debug_assert_ne!(metadata.candidate_removal_index(), index);
+                    if index == queue.len() - 1 {
+                        index = metadata.candidate_removal_index();
+                    }
+                    Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
                 }
 
                 // In queues, touching an entry does not change its position, but we still need
@@ -87,7 +96,7 @@ macro_rules! impl_queue_policy {
                 index
             }
 
-            fn swap_remove_entry<K: std::hash::Hash + Eq>(
+            fn swap_remove_entry<K>(
                 index: usize,
                 metadata: &mut Self::MetadataType,
                 queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,

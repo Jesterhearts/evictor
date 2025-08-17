@@ -9,6 +9,7 @@ mod queue;
 #[cfg(feature = "rand")]
 mod random;
 mod r#ref;
+mod sieve;
 mod utils;
 
 use std::{
@@ -28,6 +29,7 @@ pub use queue::{
 #[cfg(feature = "rand")]
 pub use random::RandomPolicy;
 pub use r#ref::Entry;
+pub use sieve::SIEVEPolicy;
 
 #[cfg(not(feature = "ahash"))]
 type RandomState = std::hash::RandomState;
@@ -153,7 +155,7 @@ pub trait Metadata: Default + private::Sealed {
     /// - The cache is at capacity and a new entry needs to be inserted
     /// - The `pop()` method is called to explicitly remove the tail entry
     /// - The `tail()` method is called to inspect the next eviction candidate
-    fn tail_index(&self) -> usize;
+    fn candidate_removal_index(&self) -> usize;
 }
 
 /// Trait defining cache eviction policies.
@@ -195,6 +197,10 @@ pub trait Metadata: Default + private::Sealed {
 /// ## Randomized Policies
 /// - **Random**: Evicts entries randomly
 ///
+/// ## SIEVE Policy
+/// - **SIEVE**: Uses a visited bit and hand pointer for efficient eviction with
+///   second-chance semantics
+///
 /// # Error Handling
 ///
 /// Policy implementations should handle edge cases gracefully:
@@ -233,6 +239,7 @@ pub trait Policy<T>: private::Sealed {
     /// The new index of the entry after any reordering
     fn touch_entry<K>(
         index: usize,
+        make_room: bool,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize;
@@ -256,7 +263,7 @@ pub trait Policy<T>: private::Sealed {
     ///
     /// # Returns
     /// - The removed key-value pair, or None if the index was invalid
-    fn swap_remove_entry<K: Hash + Eq>(
+    fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
@@ -609,15 +616,146 @@ pub type LIFO<Key, Value> = Cache<Key, Value, LIFOPolicy>;
 #[cfg(feature = "rand")]
 pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 
+/// A SIEVE cache implementing the algorithm outlined in the paper
+/// [SIEVE is Simpler than LRU](https://junchengyang.com/publication/nsdi24-SIEVE.pdf).
+///
+/// SIEVE is a simple and efficient eviction policy that provides performance
+/// comparable to LRU while being significantly easier to implement and
+/// maintain. It uses a "visited" bit per entry and a hand pointer that scans
+/// for eviction candidates, giving recently accessed items a "second chance"
+/// before eviction.
+///
+/// # Algorithm Overview
+///
+/// SIEVE maintains:
+/// - A **visited bit** for each cache entry (initially false)
+/// - A **hand pointer** that moves through entries looking for eviction
+///   candidates
+/// - A **doubly-linked list** structure for efficient traversal
+///
+/// ## Key Operations
+///
+/// ### Access (get/get_mut)
+/// When an entry is accessed:
+/// 1. The visited bit is set to `true`
+/// 2. The entry position in eviction order may be updated
+///
+/// ### Eviction
+/// When space is needed:
+/// 1. The hand pointer scans entries starting from its current position
+/// 2. For each entry with `visited = true`: reset to `false` and continue
+///    scanning
+/// 3. The first entry with `visited = false` is evicted
+/// 4. The hand pointer advances to the next position
+///
+/// This gives recently accessed entries a "second chance" - they're skipped
+/// once during eviction scanning, but evicted if accessed again without being
+/// used.
+///
+/// # Time Complexity
+/// - Insert/Get/Remove: O(1) average, O(n) worst case
+/// - Peek/Contains: O(1) average, O(n) worst case
+/// - Pop/Clear: O(1) average, O(n) worst case
+///
+/// # Examples
+///
+/// ## Basic Usage
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::SIEVE;
+///
+/// let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+/// cache.insert(1, "one");
+/// cache.insert(2, "two");
+/// cache.insert(3, "three");
+///
+/// // Access entry 1 to set its visited bit
+/// cache.get(&1);
+///
+/// // This will evict entry 2 (unvisited), not entry 1
+/// cache.insert(4, "four");
+/// assert!(cache.contains_key(&1)); // Still present (second chance)
+/// assert!(!cache.contains_key(&2)); // Evicted
+/// ```
+///
+/// ## Second Chance Behavior
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::SIEVE;
+///
+/// let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+/// cache.insert("A", 1);
+/// cache.insert("B", 2);
+///
+/// // Access A to mark it as visited
+/// cache.get(&"A");
+///
+/// // Insert C - will scan and find A visited, reset its bit, continue to B
+/// cache.insert("C", 3);
+/// assert!(cache.contains_key(&"A")); // A got second chance
+/// assert!(!cache.contains_key(&"B")); // B was evicted
+///
+/// // Now A's visited bit is false, so next eviction will remove A
+/// cache.insert("D", 4);
+/// assert!(!cache.contains_key(&"A")); // A evicted (used its second chance)
+/// assert!(cache.contains_key(&"C"));
+/// assert!(cache.contains_key(&"D"));
+/// ```
+///
+/// ## Comparison with peek() vs get()
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::SIEVE;
+///
+/// let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+/// cache.insert(1, "one");
+/// cache.insert(2, "two");
+///
+/// // peek() does NOT set visited bit
+/// cache.peek(&1);
+/// cache.insert(3, "three"); // Evicts 1 (not visited)
+/// assert!(!cache.contains_key(&1));
+///
+/// // get() DOES set visited bit
+/// cache.get(&2);
+/// cache.insert(4, "four"); // Evicts 3 (2 gets second chance)
+/// assert!(cache.contains_key(&2));
+/// assert!(!cache.contains_key(&3));
+/// ```
+///
+/// ## Iteration Order
+/// ```rust
+/// use std::num::NonZeroUsize;
+///
+/// use evictor::SIEVE;
+///
+/// let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+/// cache.insert("A", 1);
+/// cache.insert("B", 2);
+/// cache.insert("C", 3);
+///
+/// // Iteration follows eviction order (starting from hand position)
+/// let items: Vec<_> = cache.iter().collect();
+/// // Order depends on hand position and visited bits
+/// assert_eq!(items.len(), 3);
+///
+/// // First item should match tail() (next eviction candidate)
+/// assert_eq!(cache.tail().unwrap(), cache.iter().next().unwrap());
+/// ```
+pub type SIEVE<Key, Value> = Cache<Key, Value, SIEVEPolicy>;
+
 /// A generic cache implementation with configurable eviction policies.
 ///
 /// `Cache` is the underlying generic structure that powers LRU, MRU, LFU,
-/// FIFO, LIFO, and Random caches. The eviction behavior is determined by the
-/// `PolicyType` parameter, which must implement the `Policy` trait.
+/// FIFO, LIFO, Random, and SIEVE caches. The eviction behavior is determined by
+/// the `PolicyType` parameter, which must implement the `Policy` trait.
 ///
 /// For most use cases, you should use the type aliases [`Lru`], [`Mru`],
-/// [`Lfu`], [`FIFO`], [`LIFO`], or [`Random`] instead of using `Cache`
-/// directly.
+/// [`Lfu`], [`FIFO`], [`LIFO`], [`Random`], or [`SIEVE`] instead of using
+/// `Cache` directly.
 ///
 /// # Type Parameters
 ///
@@ -842,6 +980,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - FIFO: Returns the first inserted entry
     /// - LIFO: Returns the last inserted entry
     /// - Random: Returns a randomly selected entry
+    /// - SIEVE: Returns the entry at the hand position, which is the current
+    ///   eviction candidate. If this entry has been accessed (visited=true), it
+    ///   will get a second chance and the hand will advance to find the next
+    ///   unvisited entry for actual eviction.
     ///
     /// # Returns
     ///
@@ -868,7 +1010,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn tail(&self) -> Option<(&Key, &Value)> {
         self.queue
-            .get_index(self.metadata.tail_index())
+            .get_index(self.metadata.candidate_removal_index())
             .map(|(key, entry)| (key, entry.value()))
     }
 
@@ -985,26 +1127,25 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         or_insert: impl FnOnce(&Key) -> Value,
     ) -> &mut Value {
         let len = self.queue.len();
-        let mut index = match self.queue.entry(key) {
-            indexmap::map::Entry::Occupied(o) => o.index(),
+        match self.queue.entry(key) {
+            indexmap::map::Entry::Occupied(o) => {
+                let index =
+                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+                self.queue[index].value_mut()
+            }
             indexmap::map::Entry::Vacant(v) => {
-                let mut index = v.index();
+                let index = v.index();
                 let e = PolicyType::EntryType::new(or_insert(v.key()));
                 v.insert(e);
-
-                // Our previous len was at capacity, but we just inserted a new entry.
-                // So we need to remove the oldest entry.
-                if len == self.capacity.get() {
-                    index = self.metadata.tail_index();
-                    PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue);
-                }
-
-                index
+                let index = PolicyType::touch_entry(
+                    index,
+                    len == self.capacity.get(),
+                    &mut self.metadata,
+                    &mut self.queue,
+                );
+                self.queue[index].value_mut()
             }
-        };
-
-        index = PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
-        self.queue[index].value_mut()
+        }
     }
 
     /// Inserts a key-value pair into the cache.
@@ -1093,28 +1234,27 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn insert_mut(&mut self, key: Key, value: Value) -> &mut Value {
         let len = self.queue.len();
-        let mut index = match self.queue.entry(key) {
+        match self.queue.entry(key) {
             indexmap::map::Entry::Occupied(mut o) => {
                 *o.get_mut().value_mut() = value;
-                o.index()
+                let index =
+                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+                self.queue[index].value_mut()
             }
             indexmap::map::Entry::Vacant(v) => {
-                let mut index = v.index();
+                let index = v.index();
                 v.insert(PolicyType::EntryType::new(value));
 
-                // Our previous len was at capacity, but we just inserted a new entry.
-                // So we need to remove the oldest entry.
-                if len == self.capacity.get() {
-                    index = self.metadata.tail_index();
-                    PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue);
-                }
+                let index = PolicyType::touch_entry(
+                    index,
+                    len == self.capacity.get(),
+                    &mut self.metadata,
+                    &mut self.queue,
+                );
 
-                index
+                self.queue[index].value_mut()
             }
-        };
-
-        index = PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
-        self.queue[index].value_mut()
+        }
     }
 
     /// Gets a value from the cache, marking it as touched.
@@ -1198,7 +1338,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
         if let Some(index) = self.queue.get_index_of(key) {
-            let index = PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
+            let index = PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
             Some(self.queue[index].value_mut())
         } else {
             None
@@ -1243,7 +1383,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn pop(&mut self) -> Option<(Key, Value)> {
         PolicyType::swap_remove_entry(
-            self.metadata.tail_index(),
+            self.metadata.candidate_removal_index(),
             &mut self.metadata,
             &mut self.queue,
         )
@@ -1402,11 +1542,20 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - The eviction order itself is always random regardless of iteration
     ///   order
     ///
+    /// ## SIEVE
+    /// Iterates in **eviction order assuming no modifications**:
+    /// - Starts from the current hand position (next eviction candidate)
+    /// - Simulates the eviction scanning process: skips visited entries once,
+    ///   then includes them in order
+    /// - Uses additional state tracking and map lookups to maintain this
+    ///   logical ordering
+    /// - **Higher overhead** than other policies due to eviction simulation
+    ///
     /// # Time Complexity
     /// - Creating the iterator: **O(1)**
     /// - Iterating through all entries: **O(n)** where n is the cache size
     /// - Each `next()` call: **O(1)** for LRU/MRU/FIFO/LIFO/Random, **O(1)
-    ///   amortized** for LFU
+    ///   amortized** for LFU, **O(1) with higher constant overhead** for SIEVE
     ///
     /// # Examples
     ///
@@ -1517,6 +1666,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - **FIFO**: Keys from first inserted to last inserted
     /// - **LIFO**: Keys from last inserted to first inserted
     /// - **Random**: Keys in random order (debug) or arbitrary order (release)
+    /// - **SIEVE**: Keys in eviction order.
     ///
     /// # Examples
     ///
@@ -1554,6 +1704,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - **LIFO**: Values from last inserted to first inserted
     /// - **Random**: Values in random order (debug) or arbitrary order
     ///   (release)
+    /// - **SIEVE**: Values following eviction order.
     ///
     /// # Examples
     ///
@@ -1660,6 +1811,7 @@ impl<K, V, PolicyType: Policy<V>> IntoIterator for Cache<K, V, PolicyType> {
     /// - **FIFO**: From first inserted to last inserted
     /// - **LIFO**: From last inserted to first inserted
     /// - **Random**: In random order (debug) or arbitrary order (release)
+    /// - **SIEVE**: Following eviction order.
     ///
     /// # Returns
     /// An iterator that yields `(K, V)` pairs in eviction order, consuming the
@@ -1714,12 +1866,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
             match queue.entry(key) {
                 indexmap::map::Entry::Occupied(mut o) => {
                     *o.get_mut().value_mut() = value;
-                    PolicyType::touch_entry(o.index(), &mut metadata, &mut queue);
+                    PolicyType::touch_entry(o.index(), false, &mut metadata, &mut queue);
                 }
                 indexmap::map::Entry::Vacant(v) => {
                     let index = v.index();
                     v.insert(PolicyType::EntryType::new(value));
-                    PolicyType::touch_entry(index, &mut metadata, &mut queue);
+                    PolicyType::touch_entry(index, false, &mut metadata, &mut queue);
                 }
             }
         }
@@ -1790,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn test_heap_lfu_cache_clone() {
+    fn test_lfu_cache_clone() {
         use std::num::NonZeroUsize;
 
         use crate::{
@@ -1819,6 +1971,82 @@ mod tests {
         let mut cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_fifo_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            FIFOPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, FIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_lifo_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            LIFOPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, LIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_random_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            RandomPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, RandomPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let cloned_cache = cache.clone();
+        assert_eq!(cloned_cache.len(), 2);
+        assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
+        assert_eq!(cloned_cache.peek(&2), Some(&"two".to_string()));
+    }
+
+    #[test]
+    fn test_sieve_cache_clone() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            SIEVEPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, SIEVEPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
         let cloned_cache = cache.clone();
         assert_eq!(cloned_cache.len(), 2);
         assert_eq!(cloned_cache.peek(&1), Some(&"one".to_string()));
@@ -1873,6 +2101,82 @@ mod tests {
         };
 
         let mut cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
+    }
+
+    #[test]
+    fn test_fifo_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            FIFOPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, FIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
+    }
+
+    #[test]
+    fn test_lifo_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            LIFOPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, LIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
+    }
+
+    #[test]
+    fn test_random_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            RandomPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, RandomPolicy>::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let debug_str = format!("{:?}", cache);
+        assert!(debug_str.contains("Cache"));
+        assert!(debug_str.contains("\"one\""));
+        assert!(debug_str.contains("\"two\""));
+    }
+
+    #[test]
+    fn test_sieve_cache_debug() {
+        use std::num::NonZeroUsize;
+
+        use crate::{
+            Cache,
+            SIEVEPolicy,
+        };
+
+        let mut cache = Cache::<i32, String, SIEVEPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 

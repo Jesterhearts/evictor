@@ -1,5 +1,3 @@
-use std::hash::Hash;
-
 use indexmap::IndexMap;
 
 use crate::{
@@ -68,7 +66,7 @@ pub struct LfuMetadata {
 impl private::Sealed for LfuMetadata {}
 
 impl Metadata for LfuMetadata {
-    fn tail_index(&self) -> usize {
+    fn candidate_removal_index(&self) -> usize {
         self.frequency_head_tail
             .get_index(self.head_bucket)
             .map_or(0, |(_, bucket)| bucket.tail)
@@ -81,12 +79,21 @@ impl<T> Policy<T> for LfuPolicy {
     type MetadataType = LfuMetadata;
 
     fn touch_entry<K>(
-        index: usize,
+        mut index: usize,
+        make_room: bool,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
+        }
+
+        if make_room {
+            debug_assert_ne!(index, metadata.candidate_removal_index());
+            if index == queue.len() - 1 {
+                index = metadata.candidate_removal_index();
+            }
+            Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
         }
 
         // I.e. if you've been running this cache for hundreds of years (~600 years
@@ -156,7 +163,7 @@ impl<T> Policy<T> for LfuPolicy {
         index
     }
 
-    fn swap_remove_entry<K: Hash + Eq>(
+    fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,

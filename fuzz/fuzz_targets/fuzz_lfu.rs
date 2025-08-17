@@ -9,7 +9,7 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
     let (size, operations) = data;
     let size = size.max(1);
 
-    let mut cache = Lfu::<u16, u16>::new(NonZeroUsize::new(size as usize).unwrap());
+    let mut cache = Lfu::<u8, u8>::new(NonZeroUsize::new(size as usize).unwrap());
 
     for operation in operations {
         assert!(

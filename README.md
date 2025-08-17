@@ -14,6 +14,8 @@ Provides several cache implementations with different eviction policies:
 - **LIFO (Last In, First Out)** - Evicts the item that was inserted most recently, regardless of
   access patterns
 - **Random** - Evicts a randomly selected item when the cache is full
+- **SIEVE** - Efficient eviction using visited bits and hand pointer. See the
+  [paper](https://junchengyang.com/publication/nsdi24-SIEVE.pdf) for details.
 
 All caches are generic over key and value types, with a configurable capacity.
 
@@ -165,13 +167,39 @@ assert_eq!(cache.len(), 3);
 assert!(cache.contains_key(&4)); // 4 was just inserted
 ```
 
+### SIEVE Cache
+
+Efficient eviction using visited bits and hand pointer. SIEVE provides performance comparable to
+LRU. It gives recently accessed items a "second chance" before eviction:
+
+```rust
+use std::num::NonZeroUsize;
+use evictor::SIEVE;
+
+let mut cache = SIEVE::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+
+cache.insert(1, "one".to_string());
+cache.insert(2, "two".to_string());
+cache.insert(3, "three".to_string());
+
+// Access entry to set visited bit (gives it a second chance)
+cache.get(&1);
+
+// Insert when full - SIEVE scans for unvisited entries to evict
+cache.insert(4, "four".to_string());
+assert!(cache.contains_key(&1));  // 1 gets second chance (was accessed)
+assert!(!cache.contains_key(&2)); // 2 was evicted (not accessed)
+assert!(cache.contains_key(&3));  // 3 remains
+assert!(cache.contains_key(&4));  // 4 was just inserted
+```
+
 ### Creating from Iterator
 
 All cache types can be created from iterators. This will set the capacity to the number of items in
 the iterator:
 
 ```rust
-use evictor::{Lru, Mru, Lfu, FIFO, LIFO, Random};
+use evictor::{Lru, Mru, Lfu, FIFO, LIFO, Random, SIEVE};
 
 let items = vec![
     (1, "one".to_string()),
@@ -185,7 +213,8 @@ let mru_cache: Mru<i32, String> = items.clone().into_iter().collect();
 let lfu_cache: Lfu<i32, String> = items.clone().into_iter().collect();
 let fifo_cache: FIFO<i32, String> = items.clone().into_iter().collect();
 let lifo_cache: LIFO<i32, String> = items.clone().into_iter().collect();
-let random_cache: Random<i32, String> = items.into_iter().collect();
+let random_cache: Random<i32, String> = items.clone().into_iter().collect();
+let sieve_cache: SIEVE<i32, String> = items.into_iter().collect();
 ```
 
 ### Common Operations
@@ -194,7 +223,7 @@ All cache types support the same operations with identical APIs:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::Lru; // Could also use Mru, Lfu, FIFO, LIFO, or Random
+use evictor::Lru; // Could also use Mru, Lfu, FIFO, LIFO, Random, or SIEVE
 
 let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 

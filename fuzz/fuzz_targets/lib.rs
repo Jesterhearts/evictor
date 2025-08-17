@@ -1,15 +1,15 @@
 #[derive(Debug)]
 pub enum CacheOperation {
-    Insert(u16, u16),
-    Get(u16),
-    Peek(u16),
-    Remove(u16),
+    Insert(u8, u8),
+    Get(u8),
+    Peek(u8),
+    Remove(u8),
     Pop,
     Clear,
-    GetOrInsertWith(u16, u16),
+    GetOrInsertWith(u8, u8),
     Retain,
     Iter,
-    PeekMut(u16, u16),
+    PeekMut(u8, u8),
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for CacheOperation {

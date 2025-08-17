@@ -125,7 +125,12 @@ pub struct Entry<'c, K, V, P: Policy<V>> {
 impl<K, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
     fn drop(&mut self) {
         if self.dirty {
-            P::touch_entry(self.index, &mut self.cache.metadata, &mut self.cache.queue);
+            P::touch_entry(
+                self.index,
+                false,
+                &mut self.cache.metadata,
+                &mut self.cache.queue,
+            );
         }
     }
 }

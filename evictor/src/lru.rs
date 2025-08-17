@@ -62,7 +62,7 @@ pub struct LruMetadata {
 impl private::Sealed for LruMetadata {}
 
 impl Metadata for LruMetadata {
-    fn tail_index(&self) -> usize {
+    fn candidate_removal_index(&self) -> usize {
         self.tail
     }
 }
@@ -73,12 +73,21 @@ impl<T> Policy<T> for LruPolicy {
     type MetadataType = LruMetadata;
 
     fn touch_entry<K>(
-        index: usize,
+        mut index: usize,
+        make_room: bool,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
+        }
+
+        if make_room {
+            debug_assert_ne!(metadata.candidate_removal_index(), index);
+            if index == queue.len() - 1 {
+                index = metadata.candidate_removal_index();
+            }
+            Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
         }
 
         let old_head = metadata.head;
@@ -108,7 +117,7 @@ impl<T> Policy<T> for LruPolicy {
         index
     }
 
-    fn swap_remove_entry<K: Hash + Eq>(
+    fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
