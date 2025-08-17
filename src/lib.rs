@@ -1492,6 +1492,79 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         PolicyType::iter(&self.metadata, &self.queue)
     }
 
+    /// Returns an iterator over the keys in the cache in eviction order.
+    ///
+    /// This method returns an iterator that yields references to all keys
+    /// currently stored in the cache. The keys are returned in the same order
+    /// as [`iter()`](Self::iter), which follows the cache's eviction policy.
+    ///
+    /// # Eviction Order
+    ///
+    /// The iteration order depends on the cache's eviction policy:
+    /// - **LRU**: Keys from least recently used to most recently used
+    /// - **MRU**: Keys from most recently used to least recently used
+    /// - **LFU**: Keys from least frequently used to most frequently used
+    /// - **FIFO**: Keys from first inserted to last inserted
+    /// - **LIFO**: Keys from last inserted to first inserted
+    /// - **Random**: Keys in random order (debug) or arbitrary order (release)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    /// cache.insert("C", 3);
+    ///
+    /// // Get keys in LRU order (least recently used first)
+    /// let keys: Vec<_> = cache.keys().collect();
+    /// assert_eq!(keys, [&"A", &"B", &"C"]);
+    /// ```
+    pub fn keys(&self) -> impl Iterator<Item = &Key> {
+        PolicyType::iter(&self.metadata, &self.queue).map(|(k, _)| k)
+    }
+
+    /// Returns an iterator over the values in the cache in eviction order.
+    ///
+    /// This method returns an iterator that yields references to all values
+    /// currently stored in the cache. The values are returned in the same order
+    /// as [`iter()`](Self::iter), which follows the cache's eviction policy.
+    ///
+    /// # Eviction Order
+    ///
+    /// The iteration order depends on the cache's eviction policy:
+    /// - **LRU**: Values from least recently used to most recently used
+    /// - **MRU**: Values from most recently used to least recently used
+    /// - **LFU**: Values from least frequently used to most frequently used
+    /// - **FIFO**: Values from first inserted to last inserted
+    /// - **LIFO**: Values from last inserted to first inserted
+    /// - **Random**: Values in random order (debug) or arbitrary order
+    ///   (release)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert("A", 1);
+    /// cache.insert("B", 2);
+    /// cache.insert("C", 3);
+    ///
+    /// // Get values in LRU order (least recently used first)
+    /// let values: Vec<_> = cache.values().collect();
+    /// assert_eq!(values, [&1, &2, &3]);
+    /// ```
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        PolicyType::iter(&self.metadata, &self.queue).map(|(_, v)| v)
+    }
+
     /// Retains only the entries for which the predicate returns `true`.
     ///
     /// This iterates in **arbitrary order**. I.e. unlike `iter()`, the order of

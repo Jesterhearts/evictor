@@ -452,19 +452,7 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(index) = self.index {
             let (key, entry) = self.queue.get_index(index)?;
-            if let Some(next) = entry.next {
-                self.index = Some(next);
-            } else {
-                let next_bucket = self
-                    .metadata
-                    .frequency_head_tail
-                    .get_index(self.freq_bucket)
-                    .and_then(|(_, bucket)| bucket.next_bucket);
-                self.freq_bucket = next_bucket.unwrap_or(self.freq_bucket);
-                self.index = next_bucket
-                    .map(|next_bucket| self.metadata.frequency_head_tail[next_bucket].tail);
-            }
-
+            self.index = iter_next(entry, self.metadata, &mut self.freq_bucket);
             Some((key, entry.value()))
         } else {
             None
@@ -487,19 +475,7 @@ impl<K, T> Iterator for IntoIter<K, T> {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(index) = self.index {
             let (key, entry) = self.queue.get_mut(index)?.take()?;
-            if let Some(next) = entry.next {
-                self.index = Some(next);
-            } else {
-                let next_bucket = self
-                    .metadata
-                    .frequency_head_tail
-                    .get_index(self.freq_bucket)
-                    .and_then(|(_, bucket)| bucket.next_bucket);
-                self.freq_bucket = next_bucket.unwrap_or(self.freq_bucket);
-                self.index = next_bucket
-                    .map(|next_bucket| self.metadata.frequency_head_tail[next_bucket].tail);
-            }
-
+            self.index = iter_next(&entry, &self.metadata, &mut self.freq_bucket);
             Some((key, entry.into_value()))
         } else {
             None
@@ -521,23 +497,28 @@ impl<K, T> Iterator for IntoEntriesIter<K, T> {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(index) = self.index {
             let (key, entry) = self.queue.get_mut(index)?.take()?;
-            if let Some(next) = entry.next {
-                self.index = Some(next);
-            } else {
-                let next_bucket = self
-                    .metadata
-                    .frequency_head_tail
-                    .get_index(self.freq_bucket)
-                    .and_then(|(_, bucket)| bucket.next_bucket);
-                self.freq_bucket = next_bucket.unwrap_or(self.freq_bucket);
-                self.index = next_bucket
-                    .map(|next_bucket| self.metadata.frequency_head_tail[next_bucket].tail);
-            }
-
+            self.index = iter_next(&entry, &self.metadata, &mut self.freq_bucket);
             Some((key, entry))
         } else {
             None
         }
+    }
+}
+
+fn iter_next<T>(
+    entry: &LfuEntry<T>,
+    metadata: &LfuMetadata,
+    freq_bucket: &mut usize,
+) -> Option<usize> {
+    if let Some(next) = entry.next {
+        Some(next)
+    } else {
+        let next_bucket = metadata
+            .frequency_head_tail
+            .get_index(*freq_bucket)
+            .and_then(|(_, bucket)| bucket.next_bucket);
+        *freq_bucket = next_bucket.unwrap_or(*freq_bucket);
+        next_bucket.map(|next_bucket| metadata.frequency_head_tail[next_bucket].tail)
     }
 }
 
