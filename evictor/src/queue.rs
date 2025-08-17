@@ -127,6 +127,15 @@ macro_rules! impl_queue_policy {
                     index: Some(metadata.tail),
                 }
             }
+
+            #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+            fn debug_validate<K: std::hash::Hash + Eq>(
+                metadata: &Self::MetadataType,
+                queue: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+            ) {
+                use crate::utils::validate_ll;
+                validate_ll!(metadata, queue);
+            }
         }
 
         impl_ll_iters!($entry_name);

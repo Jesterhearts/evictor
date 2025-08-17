@@ -154,3 +154,35 @@ macro_rules! impl_ll_iters {
 }
 
 pub(crate) use impl_ll_iters;
+
+#[cfg(all(debug_assertions, feature = "internal-debugging"))]
+macro_rules! validate_ll {
+    ($metadata:expr, $queue:expr) => {
+        let keys = Self::iter($metadata, $queue)
+            .map(|kv| kv.0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys.len(),
+            $queue.len(),
+            "LLPolicy debug validation failed: item count mismatch",
+        );
+        if keys.is_empty() {
+            assert_eq!(
+                $metadata.tail, 0,
+                "LLPolicy debug validation failed: tail index should be 0 for empty cache"
+            );
+            assert_eq!(
+                $metadata.head, 0,
+                "LLPolicy debug validation failed: head index should be 0 for empty cache"
+            );
+            return;
+        }
+
+        for key in keys {
+            assert!($queue.contains_key(key), "LLPolicy debug validation failed");
+        }
+    };
+}
+
+#[cfg(all(debug_assertions, feature = "internal-debugging"))]
+pub(crate) use validate_ll;

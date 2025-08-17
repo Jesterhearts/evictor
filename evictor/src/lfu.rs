@@ -245,6 +245,109 @@ impl<T> Policy<T> for LfuPolicy {
             metadata,
         }
     }
+
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    fn debug_validate<K>(
+        metadata: &Self::MetadataType,
+        queue: &IndexMap<K, Self::EntryType, RandomState>,
+    ) {
+        if metadata.frequency_head_tail.is_empty() {
+            assert!(
+                queue.is_empty(),
+                "Queue should be empty when no frequency buckets exist"
+            );
+            return;
+        }
+
+        assert!(
+            metadata.head_bucket < metadata.frequency_head_tail.len(),
+            "Head bucket index out of bounds",
+        );
+
+        let mut current_bucket = Some(metadata.head_bucket);
+        let mut prev_bucket = None;
+
+        let mut seen_buckets = 0;
+        let mut seen_entries = 0;
+        let mut prev_frequency = None;
+        while let Some(current) = current_bucket {
+            let (freq, bucket) = metadata
+                .frequency_head_tail
+                .get_index(current)
+                .expect("Bucket index out of bounds");
+            seen_buckets += 1;
+            current_bucket = bucket.next_bucket;
+
+            assert_eq!(
+                prev_bucket, bucket.prev_bucket,
+                "Bucket's previous bucket does not match expected: {prev_bucket:?} != {bucket:?}",
+            );
+            prev_bucket = Some(current);
+
+            if let Some(prev_freq) = prev_frequency {
+                assert!(
+                    *freq > prev_freq,
+                    "Frequency buckets are not in increasing order: {prev_freq} >= {freq}",
+                );
+            }
+            prev_frequency = Some(*freq);
+            assert!(
+                bucket.head < queue.len(),
+                "Bucket head index out of bounds: {bucket:?}",
+            );
+            assert!(
+                bucket.tail < queue.len(),
+                "Bucket tail index out of bounds: {bucket:?}",
+            );
+
+            let mut current_index = bucket.tail;
+            seen_entries += 1;
+            assert_eq!(
+                queue[current_index].frequency, *freq,
+                "Bucket tail frequency does not match bucket frequency: {current_index} != {freq:?}",
+            );
+            assert_eq!(
+                queue[current_index].prev, None,
+                "Bucket tail's previous pointer should be None: {current_index} != {freq:?}",
+            );
+            while let Some(next) = queue[current_index].next {
+                assert!(
+                    next < queue.len(),
+                    "Next index in bucket points out of bounds: {next} >= {}",
+                    queue.len()
+                );
+                assert_eq!(
+                    queue[next].prev,
+                    Some(current_index),
+                    "Next entry's previous pointer does not point back to current index: {current_index} != {next:?}",
+                );
+                assert_eq!(
+                    queue[current_index].frequency, *freq,
+                    "Entry frequency does not match bucket frequency: {current_index} != {freq:?}",
+                );
+                current_index = next;
+                seen_entries += 1;
+            }
+            assert_eq!(
+                current_index, bucket.head,
+                "Bucket's head does not match the last entry in the bucket: {current_index} != {}",
+                bucket.head
+            );
+        }
+
+        assert_eq!(
+            seen_buckets,
+            metadata.frequency_head_tail.len(),
+            "Not all frequency buckets were seen: {seen_buckets} != {}",
+            metadata.frequency_head_tail.len()
+        );
+        assert_eq!(
+            seen_entries,
+            queue.len(),
+            "Not all entries in the queue were seen: {seen_entries} != {}",
+            queue.len()
+        )
+    }
 }
 
 fn unlink_node<K, T>(

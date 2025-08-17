@@ -140,6 +140,14 @@ impl<T> Policy<T> for RandomPolicy {
             queue: queue.into_iter().map(Some).collect(),
         }
     }
+
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    fn debug_validate<K: std::hash::Hash + Eq>(
+        _: &Self::MetadataType,
+        _: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+    ) {
+        // Nothing to do
+    }
 }
 
 struct Iter<'q, K, T> {

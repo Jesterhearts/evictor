@@ -7,8 +7,9 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
     let (size, operations) = data;
+    let size = size.max(1);
 
-    let mut cache = Lfu::<u16, u16>::new(NonZeroUsize::new(size.max(1) as usize).unwrap());
+    let mut cache = Lfu::<u16, u16>::new(NonZeroUsize::new(size as usize).unwrap());
 
     for operation in operations {
         assert!(
@@ -20,14 +21,17 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
             size as usize,
             "Cache capacity altered: {cache:#?}",
         );
+        cache.debug_validate();
 
         match operation {
             CacheOperation::Insert(k, v) => {
                 let len = cache.len();
+                let contains_key = cache.contains_key(&k);
                 let after = *cache.insert(k, v);
                 assert!(
-                    cache.len() > len || len == cache.capacity(),
-                    "Insert operation failed to increase cache size: {k} {v} {cache:#?}",
+                    contains_key || cache.len() > len || len == cache.capacity(),
+                    "Insert operation failed to increase cache size: {} < {len} {k} {v} {cache:#?}",
+                    cache.len()
                 );
 
                 assert!(
@@ -207,4 +211,15 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
             }
         }
     }
+
+    cache.debug_validate();
+    assert!(
+        cache.len() <= size as usize,
+        "Cache size exceeded: {cache:#?}",
+    );
+    assert_eq!(
+        cache.capacity(),
+        size as usize,
+        "Cache capacity altered: {cache:#?}",
+    );
 });

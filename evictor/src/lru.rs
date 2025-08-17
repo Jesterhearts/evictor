@@ -148,6 +148,16 @@ impl<T> Policy<T> for LruPolicy {
             index: Some(metadata.tail),
         }
     }
+
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    fn debug_validate<K: Hash + Eq>(
+        metadata: &Self::MetadataType,
+        queue: &IndexMap<K, Self::EntryType, RandomState>,
+    ) {
+        use crate::utils::validate_ll;
+
+        validate_ll!(metadata, queue);
+    }
 }
 
 impl_ll_iters!(LruEntry);

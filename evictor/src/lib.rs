@@ -355,6 +355,16 @@ pub trait Policy<T>: private::Sealed {
         metadata: Self::MetadataType,
         queue: IndexMap<K, Self::EntryType, RandomState>,
     ) -> impl Iterator<Item = (K, Self::EntryType)>;
+
+    /// Validates the cache's internal state against the full set of kv pairs
+    /// known. This is **expensive** and should only be used for debugging
+    /// purposes.
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    #[doc(hidden)]
+    fn debug_validate<K: Hash + Eq>(
+        metadata: &Self::MetadataType,
+        queue: &IndexMap<K, Self::EntryType, RandomState>,
+    );
 }
 
 /// A least-recently-used (LRU) cache.
@@ -1625,6 +1635,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// Shrinks the internal storage to fit the current number of entries.
     pub fn shrink_to_fit(&mut self) {
         self.queue.shrink_to_fit();
+    }
+
+    #[doc(hidden)]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    pub fn debug_validate(&self) {
+        PolicyType::debug_validate(&self.metadata, &self.queue);
     }
 }
 

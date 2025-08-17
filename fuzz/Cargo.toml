@@ -1,5 +1,5 @@
 [package]
-name    = "evictor-fuzz"
+name    = "fuzz"
 version = "0.1.0"
 publish = false
 edition = "2024"
@@ -16,7 +16,8 @@ libfuzzer-sys = "0.4.10"
 arbitrary     = { version = "1.4.2", features = [ "derive" ] }
 
 [dependencies.evictor]
-path = "../evictor"
+path     = "../evictor"
+features = [ "internal-debugging" ]
 
 [lib]
 name = "fuzz_lib"

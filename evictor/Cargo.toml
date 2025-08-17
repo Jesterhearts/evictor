@@ -13,6 +13,8 @@ readme      = "../README.md"
 default = [ "ahash", "rand" ]
 ahash   = [ "dep:ahash" ]
 rand    = [ "dep:rand" ]
+# Enables **expensive** cache validation checks. You don't want this in production.
+internal-debugging = [  ]
 # Enables the nightly `doc_auto_cfg` feature.
 ENABLE_DOC_AUTO_CFG = [  ]
 

@@ -147,6 +147,16 @@ impl<T> Policy<T> for MruPolicy {
             index: Some(metadata.tail),
         }
     }
+
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    fn debug_validate<K: Hash + Eq>(
+        metadata: &Self::MetadataType,
+        queue: &indexmap::IndexMap<K, Self::EntryType, RandomState>,
+    ) {
+        use crate::utils::validate_ll;
+
+        validate_ll!(metadata, queue);
+    }
 }
 
 #[cfg(test)]
