@@ -27,6 +27,7 @@ impl<'a> arbitrary::Arbitrary<'a> for CacheOperation {
             )),
             7 => Ok(CacheOperation::Retain),
             8 => Ok(CacheOperation::Iter),
+            9 => Ok(CacheOperation::PeekMut(u.arbitrary()?, u.arbitrary()?)),
             _ => unreachable!(),
         }
     }
