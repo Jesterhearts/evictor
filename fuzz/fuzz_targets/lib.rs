@@ -33,7 +33,7 @@ impl std::fmt::Debug for CacheOperation {
 
 impl<'a> arbitrary::Arbitrary<'a> for CacheOperation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        match u.int_in_range(0..=8)? {
+        match u.int_in_range(0..=9)? {
             0 => Ok(CacheOperation::Insert(u.arbitrary()?, u.arbitrary()?)),
             1 => Ok(CacheOperation::Get(u.arbitrary()?)),
             2 => Ok(CacheOperation::Peek(u.arbitrary()?)),

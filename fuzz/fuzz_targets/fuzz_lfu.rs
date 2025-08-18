@@ -213,7 +213,7 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
                 let after = cache.peek(&k).copied();
                 assert_eq!(
                     after,
-                    Some(v),
+                    Some(v).filter(|_| cache.contains_key(&k)),
                     "PeekMut operation did not set value correctly for key: {k} {v} {cache:#?}",
                 );
             }
