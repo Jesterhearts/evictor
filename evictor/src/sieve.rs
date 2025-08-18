@@ -869,6 +869,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_1() {
         let mut cache = SIEVE::new(NonZeroUsize::new(1).unwrap());
         cache.insert(255, 0);
@@ -877,6 +878,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_2() {
         let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
         cache.insert(0, 5);
@@ -886,6 +888,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_3() {
         let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
         cache.insert(40, 247);
@@ -917,6 +920,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_6() {
         let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
         cache.get(&10);
@@ -930,6 +934,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_7() {
         let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
         cache.insert(0, 0);
@@ -940,6 +945,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_8() {
         let mut cache = SIEVE::new(NonZeroUsize::new(103).unwrap());
         cache.get_or_insert_with(213, |_| 6);

@@ -1,5 +1,3 @@
-use std::hash::Hash;
-
 use crate::{
     EntryValue,
     Metadata,
@@ -169,7 +167,7 @@ impl<T> Policy<T> for MruPolicy {
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
-    fn debug_validate<K: Hash + Eq + std::fmt::Debug>(
+    fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
         queue: &indexmap::IndexMap<K, Self::EntryType, RandomState>,
     ) where
