@@ -244,6 +244,15 @@ pub trait Policy<T>: private::Sealed {
         queue: &mut IndexMap<K, Self::EntryType, RandomState>,
     ) -> usize;
 
+    /// Evict the next entry from the cache. Returns the actual evicted index.
+    fn evict_entry<K>(
+        metadata: &mut Self::MetadataType,
+        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
+    ) -> (usize, Option<(K, Self::EntryType)>) {
+        let removed = metadata.candidate_removal_index();
+        (removed, Self::swap_remove_entry(removed, metadata, queue))
+    }
+
     /// Removes the entry at the specified index and returns the index of the
     /// entry which replaced it.
     ///
@@ -368,10 +377,11 @@ pub trait Policy<T>: private::Sealed {
     /// purposes.
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     #[doc(hidden)]
-    fn debug_validate<K: Hash + Eq>(
+    fn debug_validate<K: Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
         queue: &IndexMap<K, Self::EntryType, RandomState>,
-    );
+    ) where
+        T: std::fmt::Debug;
 }
 
 /// A least-recently-used (LRU) cache.
@@ -1382,12 +1392,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// );
     /// ```
     pub fn pop(&mut self) -> Option<(Key, Value)> {
-        PolicyType::swap_remove_entry(
-            self.metadata.candidate_removal_index(),
-            &mut self.metadata,
-            &mut self.queue,
-        )
-        .map(|(key, entry)| (key, entry.into_value()))
+        PolicyType::evict_entry(&mut self.metadata, &mut self.queue)
+            .1
+            .map(|(key, entry)| (key, entry.into_value()))
     }
 
     /// Removes a specific entry from the cache.
@@ -1787,7 +1794,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     pub fn shrink_to_fit(&mut self) {
         self.queue.shrink_to_fit();
     }
+}
 
+impl<K: Hash + Eq + std::fmt::Debug, Value: std::fmt::Debug, PolicyType: Policy<Value>>
+    Cache<K, Value, PolicyType>
+{
     #[doc(hidden)]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     pub fn debug_validate(&self) {

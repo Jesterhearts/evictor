@@ -29,3 +29,10 @@ path  = "fuzz_targets/fuzz_lfu.rs"
 test  = false
 doc   = false
 bench = false
+
+[[bin]]
+name  = "fuzz_sieve"
+path  = "fuzz_targets/fuzz_sieve.rs"
+test  = false
+doc   = false
+bench = false

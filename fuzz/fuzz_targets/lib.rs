@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Clone, Copy)]
 pub enum CacheOperation {
     Insert(u8, u8),
     Get(u8),
@@ -10,6 +10,25 @@ pub enum CacheOperation {
     Retain,
     Iter,
     PeekMut(u8, u8),
+}
+
+impl std::fmt::Debug for CacheOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CacheOperation::Insert(k, v) => write!(f, "cache.insert({k}, {v})"),
+            CacheOperation::Get(k) => write!(f, "cache.get(&{k})"),
+            CacheOperation::Peek(k) => write!(f, "cache.peek(&{k})"),
+            CacheOperation::Remove(k) => write!(f, "cache.remove(&{k})"),
+            CacheOperation::Pop => write!(f, "cache.pop()"),
+            CacheOperation::Clear => write!(f, "cache.clear()"),
+            CacheOperation::GetOrInsertWith(k, v) => {
+                write!(f, "cache.get_or_insert_with({k}, |_| {v})")
+            }
+            CacheOperation::Retain => write!(f, "cache.retain(|k, _| k % 2 == 0)"),
+            CacheOperation::Iter => write!(f, "cache.iter()"),
+            CacheOperation::PeekMut(k, v) => write!(f, "cache.peek_mut(&{k}, {v})"),
+        }
+    }
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for CacheOperation {

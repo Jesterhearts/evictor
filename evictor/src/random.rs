@@ -67,10 +67,10 @@ impl<T> Policy<T> for RandomPolicy {
     ) -> usize {
         if make_room {
             debug_assert_ne!(metadata.candidate_removal_index(), index);
-            if index == queue.len() - 1 {
-                index = metadata.candidate_removal_index();
+            let (removed, _) = Self::evict_entry(metadata, queue);
+            if index == queue.len() {
+                index = removed;
             }
-            Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
         }
         metadata.num_entries = queue.len();
         index

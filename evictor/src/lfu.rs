@@ -88,18 +88,23 @@ impl<T> Policy<T> for LfuPolicy {
             return index;
         }
 
+        let removal_index = metadata.candidate_removal_index();
+        #[cfg(debug_assertions)]
         if make_room {
-            debug_assert_ne!(index, metadata.candidate_removal_index());
-            if index == queue.len() - 1 {
-                index = metadata.candidate_removal_index();
-            }
-            Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
+            assert_ne!(removal_index, index);
         }
 
         // I.e. if you've been running this cache for hundreds of years (~600 years
         // worth of nanonseconds in a u64), don't do anything to re-order the
         // entry. Honestly, this might even use unreachable.
         if queue[index].frequency == u64::MAX {
+            if make_room {
+                if index == queue.len() - 1 {
+                    index = removal_index;
+                }
+                Self::evict_entry(metadata, queue);
+            }
+
             return index;
         }
 
@@ -159,6 +164,13 @@ impl<T> Policy<T> for LfuPolicy {
                     })
                 })
         );
+
+        if make_room {
+            if index == queue.len() - 1 {
+                index = removal_index;
+            }
+            Self::swap_remove_entry(removal_index, metadata, queue);
+        }
 
         index
     }
@@ -254,21 +266,23 @@ impl<T> Policy<T> for LfuPolicy {
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
-    fn debug_validate<K>(
+    fn debug_validate<K: std::fmt::Debug>(
         metadata: &Self::MetadataType,
         queue: &IndexMap<K, Self::EntryType, RandomState>,
-    ) {
+    ) where
+        T: std::fmt::Debug,
+    {
         if metadata.frequency_head_tail.is_empty() {
             assert!(
                 queue.is_empty(),
-                "Queue should be empty when no frequency buckets exist"
+                "Queue should be empty when no frequency buckets exist: {metadata:#?} {queue:#?}",
             );
             return;
         }
 
         assert!(
             metadata.head_bucket < metadata.frequency_head_tail.len(),
-            "Head bucket index out of bounds",
+            "Head bucket index out of bounds: {metadata:#?} {queue:#?}",
         );
 
         let mut current_bucket = Some(metadata.head_bucket);
@@ -287,35 +301,35 @@ impl<T> Policy<T> for LfuPolicy {
 
             assert_eq!(
                 prev_bucket, bucket.prev_bucket,
-                "Bucket's previous bucket does not match expected: {prev_bucket:?} != {bucket:?}",
+                "Bucket's previous bucket does not match expected: {prev_bucket:?} != {bucket:?}, {metadata:#?}, {queue:#?}",
             );
             prev_bucket = Some(current);
 
             if let Some(prev_freq) = prev_frequency {
                 assert!(
                     *freq > prev_freq,
-                    "Frequency buckets are not in increasing order: {prev_freq} >= {freq}",
+                    "Frequency buckets are not in increasing order: {prev_freq} >= {freq}, {metadata:#?}, {queue:#?}",
                 );
             }
             prev_frequency = Some(*freq);
             assert!(
                 bucket.head < queue.len(),
-                "Bucket head index out of bounds: {bucket:?}",
+                "Bucket head index out of bounds: {bucket:?}, {metadata:#?}, {queue:#?}",
             );
             assert!(
                 bucket.tail < queue.len(),
-                "Bucket tail index out of bounds: {bucket:?}",
+                "Bucket tail index out of bounds: {bucket:?}, {metadata:#?}, {queue:#?}",
             );
 
             let mut current_index = bucket.tail;
             seen_entries += 1;
             assert_eq!(
                 queue[current_index].frequency, *freq,
-                "Bucket tail frequency does not match bucket frequency: {current_index} != {freq:?}",
+                "Bucket tail frequency does not match bucket frequency: {current_index} != {freq:?}, {metadata:#?}, {queue:#?}",
             );
             assert_eq!(
                 queue[current_index].prev, None,
-                "Bucket tail's previous pointer should be None: {current_index} != {freq:?}",
+                "Bucket tail's previous pointer should be None: {current_index} != {freq:?}, {metadata:#?}, {queue:#?}",
             );
             while let Some(next) = queue[current_index].next {
                 assert!(
@@ -326,18 +340,18 @@ impl<T> Policy<T> for LfuPolicy {
                 assert_eq!(
                     queue[next].prev,
                     Some(current_index),
-                    "Next entry's previous pointer does not point back to current index: {current_index} != {next:?}",
+                    "Next entry's previous pointer does not point back to current index: {current_index} != {next:?}, {freq:?} {metadata:#?}, {queue:#?}",
                 );
                 assert_eq!(
                     queue[current_index].frequency, *freq,
-                    "Entry frequency does not match bucket frequency: {current_index} != {freq:?}",
+                    "Entry frequency does not match bucket frequency: {current_index} != {freq:?}, {metadata:#?}, {queue:#?}",
                 );
                 current_index = next;
                 seen_entries += 1;
             }
             assert_eq!(
                 current_index, bucket.head,
-                "Bucket's head does not match the last entry in the bucket: {current_index} != {}",
+                "Bucket's head does not match the last entry in the bucket: {current_index} != {}, {freq:?}, {metadata:#?}, {queue:#?}",
                 bucket.head
             );
         }
@@ -345,13 +359,13 @@ impl<T> Policy<T> for LfuPolicy {
         assert_eq!(
             seen_buckets,
             metadata.frequency_head_tail.len(),
-            "Not all frequency buckets were seen: {seen_buckets} != {}",
+            "Not all frequency buckets were seen: {seen_buckets} != {}, {metadata:#?} {queue:#?}",
             metadata.frequency_head_tail.len()
         );
         assert_eq!(
             seen_entries,
             queue.len(),
-            "Not all entries in the queue were seen: {seen_entries} != {}",
+            "Not all entries in the queue were seen: {seen_entries} != {}, {metadata:#?} {queue:#?}",
             queue.len()
         )
     }

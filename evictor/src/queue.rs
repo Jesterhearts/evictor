@@ -52,15 +52,15 @@ macro_rules! impl_queue_policy {
         #[derive(Debug, Clone, Copy, Default)]
         #[doc(hidden)]
         pub struct $metadata_name {
-            head: usize,
             tail: usize,
+            head: usize,
         }
 
         impl private::Sealed for $metadata_name {}
 
         impl Metadata for $metadata_name {
             fn candidate_removal_index(&self) -> usize {
-                self.tail
+                self.head
             }
         }
 
@@ -79,18 +79,23 @@ macro_rules! impl_queue_policy {
                     return index;
                 }
 
+                let removal_index = metadata.candidate_removal_index();
+                #[cfg(debug_assertions)]
                 if make_room {
-                    debug_assert_ne!(metadata.candidate_removal_index(), index);
-                    if index == queue.len() - 1 {
-                        index = metadata.candidate_removal_index();
-                    }
-                    Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
+                    assert_ne!(removal_index, index);
                 }
 
                 // In queues, touching an entry does not change its position, but we still need
                 // to link it into the list if it has no links.
                 if queue[index].next.is_none() && queue[index].prev.is_none() {
                     $link!(metadata, index, queue);
+                }
+
+                if make_room {
+                    if index == queue.len() - 1 {
+                        index = removal_index;
+                    }
+                    Self::swap_remove_entry(removal_index, metadata, queue);
                 }
 
                 index
@@ -113,7 +118,7 @@ macro_rules! impl_queue_policy {
             {
                 Iter {
                     queue,
-                    index: Some(metadata.tail),
+                    index: Some(metadata.head),
                 }
             }
 
@@ -123,7 +128,7 @@ macro_rules! impl_queue_policy {
             ) -> Self::IntoIter<K> {
                 IntoIter {
                     queue: queue.into_iter().map(Some).collect(),
-                    index: Some(metadata.tail),
+                    index: Some(metadata.head),
                 }
             }
 
@@ -133,15 +138,17 @@ macro_rules! impl_queue_policy {
             ) -> impl Iterator<Item = (K, Self::EntryType)> {
                 IntoEntriesIter {
                     queue: queue.into_iter().map(Some).collect(),
-                    index: Some(metadata.tail),
+                    index: Some(metadata.head),
                 }
             }
 
             #[cfg(all(debug_assertions, feature = "internal-debugging"))]
-            fn debug_validate<K: std::hash::Hash + Eq>(
+            fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
                 metadata: &Self::MetadataType,
                 queue: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-            ) {
+            ) where
+                T: std::fmt::Debug,
+            {
                 use crate::utils::validate_ll;
                 validate_ll!(metadata, queue);
             }
@@ -152,40 +159,40 @@ macro_rules! impl_queue_policy {
 }
 
 pub(crate) mod fifo {
-    macro_rules! link_as_head {
-        ($metadata:ident, $index:ident, $queue:ident) => {
-            if $metadata.head == $index {
-                return $index;
-            }
-
-            $queue[$index].prev = Some($metadata.head);
-            $queue[$metadata.head].next = Some($index);
-            $metadata.head = $index;
-        };
-    }
-
-    impl_queue_policy!(
-        (FIFOPolicy, FIFOEntry, FIFOMetadata) =>  link_as_head
-    );
-}
-
-pub use fifo::FIFOPolicy;
-
-pub(crate) mod lifo {
     macro_rules! link_as_tail {
         ($metadata:ident, $index:ident, $queue:ident) => {
             if $metadata.tail == $index {
                 return $index;
             }
 
-            $queue[$index].next = Some($metadata.tail);
-            $queue[$metadata.tail].prev = Some($index);
+            $queue[$index].prev = Some($metadata.tail);
+            $queue[$metadata.tail].next = Some($index);
             $metadata.tail = $index;
         };
     }
 
     impl_queue_policy!(
-        (LIFOPolicy, LIFOEntry, LIFOMetadata) => link_as_tail
+        (FIFOPolicy, FIFOEntry, FIFOMetadata) =>  link_as_tail
+    );
+}
+
+pub use fifo::FIFOPolicy;
+
+pub(crate) mod lifo {
+    macro_rules! link_as_head {
+        ($metadata:ident, $index:ident, $queue:ident) => {
+            if $metadata.head == $index {
+                return $index;
+            }
+
+            $queue[$index].next = Some($metadata.head);
+            $queue[$metadata.head].prev = Some($index);
+            $metadata.head = $index;
+        };
+    }
+
+    impl_queue_policy!(
+        (LIFOPolicy, LIFOEntry, LIFOMetadata) => link_as_head
     );
 }
 

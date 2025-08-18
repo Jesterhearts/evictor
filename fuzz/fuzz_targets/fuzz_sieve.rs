@@ -1,23 +1,21 @@
 #![no_main]
 use std::num::NonZeroUsize;
 
-use evictor::Lfu;
+use evictor::SIEVE;
 use fuzz_lib::CacheOperation;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
     let _ = std::panic::take_hook();
     let default_hook = std::panic::take_hook();
-    let data_copy = data.clone();
     std::panic::set_hook(Box::new(move |p| {
-        eprintln!("Panic occurred during fuzzing with data: {:?}", data_copy);
         default_hook(p);
     }));
 
     let (size, operations) = data;
     let size = size.max(1);
 
-    let mut cache = Lfu::<u8, u8>::new(NonZeroUsize::new(size as usize).unwrap());
+    let mut cache = SIEVE::<u8, u8>::new(NonZeroUsize::new(size as usize).unwrap());
 
     for operation in operations {
         assert!(
@@ -114,11 +112,12 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
                 )
             }
             CacheOperation::Pop => {
+                let cache_before = cache.clone();
                 let head = cache.iter().next().map(|(k, v)| (*k, *v));
                 let popped = cache.pop();
                 assert_eq!(
                     popped, head,
-                    "Pop operation did not return expected value: {cache:#?}",
+                    "Pop operation did not return expected value: {cache_before:#?} {cache:#?}",
                 );
             }
             CacheOperation::Clear => {

@@ -55,15 +55,15 @@ impl<T> EntryValue<T> for LruEntry<T> {
 #[derive(Debug, Clone, Copy, Default)]
 #[doc(hidden)]
 pub struct LruMetadata {
-    head: usize,
     tail: usize,
+    head: usize,
 }
 
 impl private::Sealed for LruMetadata {}
 
 impl Metadata for LruMetadata {
     fn candidate_removal_index(&self) -> usize {
-        self.tail
+        self.head
     }
 }
 
@@ -82,27 +82,31 @@ impl<T> Policy<T> for LruPolicy {
             return index;
         }
 
+        let removal_index = metadata.candidate_removal_index();
+        #[cfg(debug_assertions)]
         if make_room {
-            debug_assert_ne!(metadata.candidate_removal_index(), index);
-            if index == queue.len() - 1 {
-                index = metadata.candidate_removal_index();
-            }
-            Self::swap_remove_entry(metadata.candidate_removal_index(), metadata, queue);
+            assert_ne!(removal_index, index);
         }
 
-        let old_head = metadata.head;
+        let old_head = metadata.tail;
         if old_head == index {
+            if make_room {
+                if index == queue.len() - 1 {
+                    index = removal_index;
+                }
+                Self::evict_entry(metadata, queue);
+            }
             return index;
         }
 
-        metadata.head = index;
+        metadata.tail = index;
         let old_prev = queue[index].prev;
         let old_next = queue[index].next;
         queue[index].next = None;
         queue[index].prev = Some(old_head);
 
-        if metadata.tail == index {
-            metadata.tail = old_next.unwrap_or_default();
+        if metadata.head == index {
+            metadata.head = old_next.unwrap_or_default();
         }
 
         queue[old_head].next = Some(index);
@@ -114,6 +118,14 @@ impl<T> Policy<T> for LruPolicy {
         if let Some(next) = old_next {
             queue[next].prev = old_prev;
         }
+
+        if make_room {
+            if index == queue.len() - 1 {
+                index = removal_index;
+            }
+            Self::swap_remove_entry(removal_index, metadata, queue);
+        }
+
         index
     }
 
@@ -134,7 +146,7 @@ impl<T> Policy<T> for LruPolicy {
     {
         Iter {
             queue,
-            index: Some(metadata.tail),
+            index: Some(metadata.head),
         }
     }
 
@@ -144,7 +156,7 @@ impl<T> Policy<T> for LruPolicy {
     ) -> IntoIter<K, T> {
         IntoIter {
             queue: queue.into_iter().map(Some).collect(),
-            index: Some(metadata.tail),
+            index: Some(metadata.head),
         }
     }
 
@@ -154,15 +166,17 @@ impl<T> Policy<T> for LruPolicy {
     ) -> impl Iterator<Item = (K, Self::EntryType)> {
         IntoEntriesIter {
             queue: queue.into_iter().map(Some).collect(),
-            index: Some(metadata.tail),
+            index: Some(metadata.head),
         }
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
-    fn debug_validate<K: Hash + Eq>(
+    fn debug_validate<K: Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
         queue: &IndexMap<K, Self::EntryType, RandomState>,
-    ) {
+    ) where
+        T: std::fmt::Debug,
+    {
         use crate::utils::validate_ll;
 
         validate_ll!(metadata, queue);

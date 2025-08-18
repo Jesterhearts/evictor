@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::{
     EntryValue,
@@ -35,6 +35,16 @@ pub struct SIEVEEntry<V> {
     prev: Option<usize>,
     next: Option<usize>,
     visited: bool,
+}
+
+impl<V> SIEVEEntry<V> {
+    fn prev(&self) -> Option<usize> {
+        self.prev
+    }
+
+    fn visited(&self) -> bool {
+        self.visited
+    }
 }
 
 impl<Value> private::Sealed for SIEVEEntry<Value> {}
@@ -81,33 +91,51 @@ impl<Value> Policy<Value> for SIEVEPolicy {
             return index;
         }
 
-        if make_room {
-            while queue[metadata.hand].visited {
-                queue[metadata.hand].visited = false;
-                metadata.hand = queue[metadata.hand].prev.unwrap_or(metadata.tail);
-            }
-            debug_assert!(!queue[metadata.hand].visited);
-            let victim = metadata.hand;
-            let next_hand = queue[victim].prev.unwrap_or(metadata.tail);
-            if index == queue.len() - 1 {
-                // We are going to swap remove the item @ hand, so we need to update the index
-                // to point at what will become its new position.
-                index = victim;
-            }
-            Self::swap_remove_entry(victim, metadata, queue);
-            metadata.hand = next_hand;
-        }
-
         let is_new_entry = queue[index].prev.is_none() && queue[index].next.is_none();
-        if is_new_entry {
+        if is_new_entry && metadata.head != index {
             queue[metadata.head].prev = Some(index);
             queue[index].next = Some(metadata.head);
             metadata.head = index;
         }
+        queue[index].visited = true;
+
+        if make_room {
+            let (victim, _) = Self::evict_entry(metadata, queue);
+            if index == queue.len() {
+                index = victim;
+            }
+        }
 
         queue[index].visited = !is_new_entry;
 
+        #[cfg(debug_assertions)]
+        if queue.len() > 1 {
+            debug_assert_ne!(metadata.head, metadata.tail);
+        }
+
         index
+    }
+
+    fn evict_entry<K>(
+        metadata: &mut Self::MetadataType,
+        queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+    ) -> (usize, Option<(K, Self::EntryType)>) {
+        if queue.is_empty() {
+            return (0, None);
+        }
+
+        while queue[metadata.hand].visited {
+            queue[metadata.hand].visited = false;
+            metadata.hand = queue[metadata.hand].prev.unwrap_or(metadata.tail);
+        }
+        debug_assert!(!queue[metadata.hand].visited);
+        let victim = metadata.hand;
+        let result = (victim, Self::swap_remove_entry(victim, metadata, queue));
+        if queue.is_empty() {
+            return result;
+        }
+        metadata.hand = queue[metadata.hand].prev.unwrap_or(metadata.tail);
+        result
     }
 
     fn swap_remove_entry<K>(
@@ -119,11 +147,26 @@ impl<Value> Policy<Value> for SIEVEPolicy {
             return None;
         }
 
-        metadata.hand = queue[metadata.hand].prev.unwrap_or(metadata.tail);
-        if metadata.hand == queue.len().saturating_sub(1) {
+        let result = swap_remove_ll_entry!(index, metadata, queue);
+        if index == metadata.hand
+            && let Some((_, e)) = &result
+        {
+            metadata.hand = e
+                .prev
+                .map(|p| if p == queue.len() { index } else { p })
+                .unwrap_or(metadata.tail);
+        } else if metadata.hand == queue.len() {
             metadata.hand = index;
         }
-        swap_remove_ll_entry!(index, metadata, queue)
+
+        #[cfg(debug_assertions)]
+        {
+            if queue.len() > 1 {
+                debug_assert_ne!(metadata.head, metadata.tail);
+            }
+        }
+
+        result
     }
 
     fn iter<'q, K>(
@@ -133,12 +176,29 @@ impl<Value> Policy<Value> for SIEVEPolicy {
     where
         Value: 'q,
     {
+        if queue.is_empty() {
+            return Iter {
+                index: None,
+                metadata,
+                queue,
+                seen_twice: HashMap::with_capacity_and_hasher(0, crate::RandomState::default()),
+            };
+        }
+
+        let mut seen_twice = HashMap::<usize, bool, _>::with_capacity_and_hasher(
+            queue.len(),
+            crate::RandomState::default(),
+        );
+
+        let iter_index;
+        let mut index = queue[metadata.hand].next.unwrap_or(metadata.head);
+        iter_next!(index, metadata, queue, seen_twice, iter_index);
+
         Iter {
-            index: (!queue.is_empty()).then_some(metadata.candidate_removal_index()),
+            index: iter_index,
             metadata,
             queue,
-            seen: HashSet::with_capacity_and_hasher(queue.len(), crate::RandomState::default()),
-            wrapped: false,
+            seen_twice,
         }
     }
 
@@ -146,12 +206,29 @@ impl<Value> Policy<Value> for SIEVEPolicy {
         metadata: Self::MetadataType,
         queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
     ) -> Self::IntoIter<K> {
+        if queue.is_empty() {
+            return IntoIter {
+                index: None,
+                metadata,
+                queue: vec![],
+                seen_twice: HashMap::with_capacity_and_hasher(0, crate::RandomState::default()),
+            };
+        }
+
+        let mut seen_twice = HashMap::<usize, bool, _>::with_capacity_and_hasher(
+            queue.len(),
+            crate::RandomState::default(),
+        );
+
+        let iter_index;
+        let mut index = queue[metadata.hand].next.unwrap_or(metadata.head);
+        iter_next!(index, metadata, queue, seen_twice, iter_index);
+
         IntoIter {
-            index: (!queue.is_empty()).then_some(metadata.candidate_removal_index()),
+            index: iter_index,
             metadata,
-            seen: HashSet::with_capacity_and_hasher(queue.len(), crate::RandomState::default()),
+            seen_twice,
             queue: queue.into_iter().map(EntryOrPrev::from).collect(),
-            wrapped: false,
         }
     }
 
@@ -159,20 +236,39 @@ impl<Value> Policy<Value> for SIEVEPolicy {
         metadata: Self::MetadataType,
         queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
     ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        if queue.is_empty() {
+            return IntoEntriesIter {
+                index: None,
+                metadata,
+                queue: vec![],
+                seen_twice: HashMap::with_capacity_and_hasher(0, crate::RandomState::default()),
+            };
+        }
+
+        let mut seen_twice = HashMap::<usize, bool, _>::with_capacity_and_hasher(
+            queue.len(),
+            crate::RandomState::default(),
+        );
+
+        let iter_index;
+        let mut index = queue[metadata.hand].next.unwrap_or(metadata.head);
+        iter_next!(index, metadata, queue, seen_twice, iter_index);
+
         IntoEntriesIter {
-            index: (!queue.is_empty()).then_some(metadata.candidate_removal_index()),
+            index: iter_index,
             metadata,
-            seen: HashSet::with_capacity_and_hasher(queue.len(), crate::RandomState::default()),
+            seen_twice,
             queue: queue.into_iter().map(EntryOrPrev::from).collect(),
-            wrapped: false,
         }
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
-    fn debug_validate<K: std::hash::Hash + Eq>(
+    fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
         queue: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-    ) {
+    ) where
+        Value: std::fmt::Debug,
+    {
         use crate::utils::validate_ll;
 
         validate_ll!(metadata, queue);
@@ -183,8 +279,7 @@ impl<Value> Policy<Value> for SIEVEPolicy {
 struct Iter<'q, K, T> {
     metadata: &'q SIEVEMetadata,
     queue: &'q indexmap::IndexMap<K, SIEVEEntry<T>, crate::RandomState>,
-    seen: HashSet<usize, crate::RandomState>,
-    wrapped: bool,
+    seen_twice: HashMap<usize, bool, crate::RandomState>,
     index: Option<usize>,
 }
 
@@ -195,29 +290,13 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
         if let Some(mut index) = self.index {
             let entry = &self.queue.get_index(index)?;
 
-            loop {
-                let prev = self.queue[index].prev;
-                let prev = if let Some(prev) = prev {
-                    prev
-                } else if !self.wrapped {
-                    self.wrapped = true;
-                    self.metadata.tail
-                } else {
-                    self.index = None;
-                    break;
-                };
-
-                if (!self.seen.contains(&prev) && self.queue[prev].visited)
-                    || (self.seen.contains(&prev) && !self.queue[prev].visited)
-                {
-                    self.seen.insert(index);
-                    index = prev;
-                } else {
-                    self.seen.insert(index);
-                    self.index = Some(prev);
-                    break;
-                }
-            }
+            iter_next!(
+                index,
+                self.metadata,
+                self.queue,
+                self.seen_twice,
+                self.index,
+            );
 
             Some((entry.0, entry.1.value()))
         } else {
@@ -229,28 +308,28 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
 #[derive(Debug)]
 enum EntryOrPrev<K, T> {
     Entry((K, SIEVEEntry<T>)),
-    Prev(Option<usize>),
+    Prev(Option<usize>, bool),
 }
 
 impl<K, T> EntryOrPrev<K, T> {
     fn prev(&self) -> Option<usize> {
         match self {
             EntryOrPrev::Entry((_, entry)) => entry.prev,
-            EntryOrPrev::Prev(prev) => *prev,
+            EntryOrPrev::Prev(prev, _) => *prev,
         }
     }
 
     fn visited(&self) -> bool {
         match self {
             EntryOrPrev::Entry((_, entry)) => entry.visited,
-            EntryOrPrev::Prev(_) => true,
+            EntryOrPrev::Prev(_, visited) => *visited,
         }
     }
 }
 
 impl<K, T> Default for EntryOrPrev<K, T> {
     fn default() -> Self {
-        EntryOrPrev::Prev(None)
+        EntryOrPrev::Prev(None, false)
     }
 }
 
@@ -265,8 +344,7 @@ impl<K, T> From<(K, SIEVEEntry<T>)> for EntryOrPrev<K, T> {
 pub struct IntoIter<K, T> {
     metadata: SIEVEMetadata,
     queue: Vec<EntryOrPrev<K, T>>,
-    seen: HashSet<usize, crate::RandomState>,
-    wrapped: bool,
+    seen_twice: HashMap<usize, bool, crate::RandomState>,
     index: Option<usize>,
 }
 
@@ -276,34 +354,19 @@ impl<K, V> Iterator for IntoIter<K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(mut index) = self.index {
             let EntryOrPrev::Entry(entry) = std::mem::take(&mut self.queue[index]) else {
+                debug_assert!(false, "Expected EntryOrPrev::Entry at index {}", index);
                 return None;
             };
 
-            self.queue[index] = EntryOrPrev::Prev(entry.1.prev);
+            self.queue[index] = EntryOrPrev::Prev(entry.1.prev, entry.1.visited);
 
-            loop {
-                let prev = self.queue[index].prev();
-                let prev = if let Some(prev) = prev {
-                    prev
-                } else if !self.wrapped {
-                    self.wrapped = true;
-                    self.metadata.tail
-                } else {
-                    self.index = None;
-                    break;
-                };
-
-                if (!self.seen.contains(&prev) && self.queue[prev].visited())
-                    || (self.seen.contains(&prev) && !self.queue[prev].visited())
-                {
-                    self.seen.insert(index);
-                    index = prev;
-                } else {
-                    self.seen.insert(index);
-                    self.index = Some(prev);
-                    break;
-                }
-            }
+            iter_next!(
+                index,
+                self.metadata,
+                self.queue,
+                self.seen_twice,
+                self.index,
+            );
 
             Some((entry.0, entry.1.into_value()))
         } else {
@@ -315,8 +378,7 @@ impl<K, V> Iterator for IntoIter<K, V> {
 struct IntoEntriesIter<K, T> {
     metadata: SIEVEMetadata,
     queue: Vec<EntryOrPrev<K, T>>,
-    seen: HashSet<usize, crate::RandomState>,
-    wrapped: bool,
+    seen_twice: HashMap<usize, bool, crate::RandomState>,
     index: Option<usize>,
 }
 
@@ -329,31 +391,15 @@ impl<K, V> Iterator for IntoEntriesIter<K, V> {
                 debug_assert!(false, "Expected EntryOrPrev::Entry at index {}", index);
                 return None;
             };
-            self.queue[index] = EntryOrPrev::Prev(entry.1.prev);
+            self.queue[index] = EntryOrPrev::Prev(entry.1.prev, entry.1.visited);
 
-            loop {
-                let prev = self.queue[index].prev();
-                let prev = if let Some(prev) = prev {
-                    prev
-                } else if !self.wrapped {
-                    self.wrapped = true;
-                    self.metadata.tail
-                } else {
-                    self.index = None;
-                    break;
-                };
-
-                if (!self.seen.contains(&prev) && self.queue[prev].visited())
-                    || (self.seen.contains(&prev) && !self.queue[prev].visited())
-                {
-                    self.seen.insert(index);
-                    index = prev;
-                } else {
-                    self.seen.insert(index);
-                    self.index = Some(prev);
-                    break;
-                }
-            }
+            iter_next!(
+                index,
+                self.metadata,
+                self.queue,
+                self.seen_twice,
+                self.index,
+            );
 
             Some(entry)
         } else {
@@ -361,6 +407,58 @@ impl<K, V> Iterator for IntoEntriesIter<K, V> {
         }
     }
 }
+
+macro_rules! iter_next {
+    ($index:expr, $metadata:expr, $queue:expr, $seen:expr, $this_index:expr $(,)?) => {
+        #[cfg(debug_assertions)]
+        let mut loop_count: usize = 0;
+        loop {
+            #[cfg(debug_assertions)]
+            {
+                debug_assert!(
+                    loop_count <= $queue.len(),
+                    "Infinite loop detected in IntoEntriesIter for index {}, {:?}, {:?}, {:?}",
+                    $index,
+                    $seen,
+                    $queue[$index].prev(),
+                    $metadata,
+                );
+                loop_count += 1;
+            }
+
+            let prev = $queue[$index].prev();
+            let prev = if let Some(prev) = prev {
+                prev
+            } else {
+                $metadata.tail
+            };
+
+            if !$seen.contains_key(&prev) {
+                $seen.insert(prev, false);
+                if $queue[prev].visited() {
+                    $index = prev;
+                } else {
+                    $this_index = Some(prev);
+                    break;
+                }
+            } else {
+                if $seen.get(&prev).copied().unwrap_or_default() {
+                    $this_index = None;
+                    break;
+                }
+                $seen.insert(prev, true);
+                if !$queue[prev].visited() {
+                    $index = prev;
+                } else {
+                    $this_index = Some(prev);
+                    break;
+                }
+            }
+        }
+    };
+}
+
+use iter_next;
 
 #[cfg(test)]
 mod tests {
@@ -768,5 +866,88 @@ mod tests {
         assert!(keys.contains(&'b'));
         assert!(keys.contains(&'c'));
         assert!(keys.contains(&'d'));
+    }
+
+    #[test]
+    fn fuzz_1() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(1).unwrap());
+        cache.insert(255, 0);
+        cache.insert(0, 0);
+        cache.debug_validate();
+    }
+
+    #[test]
+    fn fuzz_2() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(0, 5);
+        cache.get_or_insert_with(255, |_| 43);
+        cache.get_or_insert_with(0, |_| 0);
+        cache.debug_validate();
+    }
+
+    #[test]
+    fn fuzz_3() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(40, 247);
+        cache.get_or_insert_with(7, |_| 255);
+        cache.retain(|k, _| k % 2 == 0);
+        cache.debug_validate();
+    }
+
+    #[test]
+    fn fuzz_4() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(0, 255);
+        cache.insert(159, 159);
+        cache.insert(0, 10);
+        cache.retain(|k, _| k % 2 == 0);
+        assert!(cache.contains_key(&0));
+        assert_eq!(cache.into_iter().collect::<Vec<_>>(), [(0, 10)]);
+    }
+
+    #[test]
+    fn fuzz_5() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, 1);
+        cache.insert(3, 3);
+        cache.insert(5, 5);
+        cache.retain(|k, _| k % 2 == 0);
+        cache.insert(0, 10);
+        assert_eq!(cache.into_iter().collect::<Vec<_>>(), [(0, 10)]);
+    }
+
+    #[test]
+    fn fuzz_6() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        cache.get(&10);
+        cache.insert(1, 0);
+        cache.peek(&248);
+        cache.insert(181, 181);
+        cache.get(&181);
+        cache.remove(&1);
+        assert_eq!(cache.iter().collect::<Vec<_>>(), [(&181, &181)]);
+        cache.debug_validate();
+    }
+
+    #[test]
+    fn fuzz_7() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        cache.insert(0, 0);
+        cache.insert(1, 0);
+        cache.insert(2, 0);
+
+        cache.debug_validate();
+    }
+
+    #[test]
+    fn fuzz_8() {
+        let mut cache = SIEVE::new(NonZeroUsize::new(103).unwrap());
+        cache.get_or_insert_with(213, |_| 6);
+        cache.get_or_insert_with(255, |_| 1);
+        cache.get_or_insert_with(213, |_| 6);
+        let will_pop = cache.iter().next().map(|(k, v)| (*k, *v));
+        let popped = cache.pop();
+        assert_eq!(will_pop, popped);
+        cache.debug_validate();
     }
 }
