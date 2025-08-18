@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::{
     EntryValue,
     Metadata,
@@ -181,14 +179,11 @@ impl<Value> Policy<Value> for SIEVEPolicy {
                 index: None,
                 metadata,
                 queue,
-                seen_twice: HashMap::with_capacity_and_hasher(0, crate::RandomState::default()),
+                visits: vec![0; queue.len()],
             };
         }
 
-        let mut seen_twice = HashMap::<usize, bool, _>::with_capacity_and_hasher(
-            queue.len(),
-            crate::RandomState::default(),
-        );
+        let mut seen_twice = vec![0; queue.len()];
 
         let iter_index;
         let mut index = queue[metadata.hand].next.unwrap_or(metadata.head);
@@ -198,7 +193,7 @@ impl<Value> Policy<Value> for SIEVEPolicy {
             index: iter_index,
             metadata,
             queue,
-            seen_twice,
+            visits: seen_twice,
         }
     }
 
@@ -211,23 +206,20 @@ impl<Value> Policy<Value> for SIEVEPolicy {
                 index: None,
                 metadata,
                 queue: vec![],
-                seen_twice: HashMap::with_capacity_and_hasher(0, crate::RandomState::default()),
+                visits: vec![0; queue.len()],
             };
         }
 
-        let mut seen_twice = HashMap::<usize, bool, _>::with_capacity_and_hasher(
-            queue.len(),
-            crate::RandomState::default(),
-        );
+        let mut visits = vec![0; queue.len()];
 
         let iter_index;
         let mut index = queue[metadata.hand].next.unwrap_or(metadata.head);
-        iter_next!(index, metadata, queue, seen_twice, iter_index);
+        iter_next!(index, metadata, queue, visits, iter_index);
 
         IntoIter {
             index: iter_index,
             metadata,
-            seen_twice,
+            visits,
             queue: queue.into_iter().map(EntryOrPrev::from).collect(),
         }
     }
@@ -241,23 +233,20 @@ impl<Value> Policy<Value> for SIEVEPolicy {
                 index: None,
                 metadata,
                 queue: vec![],
-                seen_twice: HashMap::with_capacity_and_hasher(0, crate::RandomState::default()),
+                visits: vec![0; queue.len()],
             };
         }
 
-        let mut seen_twice = HashMap::<usize, bool, _>::with_capacity_and_hasher(
-            queue.len(),
-            crate::RandomState::default(),
-        );
+        let mut visits = vec![0; queue.len()];
 
         let iter_index;
         let mut index = queue[metadata.hand].next.unwrap_or(metadata.head);
-        iter_next!(index, metadata, queue, seen_twice, iter_index);
+        iter_next!(index, metadata, queue, visits, iter_index);
 
         IntoEntriesIter {
             index: iter_index,
             metadata,
-            seen_twice,
+            visits,
             queue: queue.into_iter().map(EntryOrPrev::from).collect(),
         }
     }
@@ -279,7 +268,7 @@ impl<Value> Policy<Value> for SIEVEPolicy {
 struct Iter<'q, K, T> {
     metadata: &'q SIEVEMetadata,
     queue: &'q indexmap::IndexMap<K, SIEVEEntry<T>, crate::RandomState>,
-    seen_twice: HashMap<usize, bool, crate::RandomState>,
+    visits: Vec<u8>,
     index: Option<usize>,
 }
 
@@ -290,13 +279,7 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
         if let Some(mut index) = self.index {
             let entry = &self.queue.get_index(index)?;
 
-            iter_next!(
-                index,
-                self.metadata,
-                self.queue,
-                self.seen_twice,
-                self.index,
-            );
+            iter_next!(index, self.metadata, self.queue, self.visits, self.index,);
 
             Some((entry.0, entry.1.value()))
         } else {
@@ -344,7 +327,7 @@ impl<K, T> From<(K, SIEVEEntry<T>)> for EntryOrPrev<K, T> {
 pub struct IntoIter<K, T> {
     metadata: SIEVEMetadata,
     queue: Vec<EntryOrPrev<K, T>>,
-    seen_twice: HashMap<usize, bool, crate::RandomState>,
+    visits: Vec<u8>,
     index: Option<usize>,
 }
 
@@ -360,13 +343,7 @@ impl<K, V> Iterator for IntoIter<K, V> {
 
             self.queue[index] = EntryOrPrev::Prev(entry.1.prev, entry.1.visited);
 
-            iter_next!(
-                index,
-                self.metadata,
-                self.queue,
-                self.seen_twice,
-                self.index,
-            );
+            iter_next!(index, self.metadata, self.queue, self.visits, self.index,);
 
             Some((entry.0, entry.1.into_value()))
         } else {
@@ -378,7 +355,7 @@ impl<K, V> Iterator for IntoIter<K, V> {
 struct IntoEntriesIter<K, T> {
     metadata: SIEVEMetadata,
     queue: Vec<EntryOrPrev<K, T>>,
-    seen_twice: HashMap<usize, bool, crate::RandomState>,
+    visits: Vec<u8>,
     index: Option<usize>,
 }
 
@@ -393,13 +370,7 @@ impl<K, V> Iterator for IntoEntriesIter<K, V> {
             };
             self.queue[index] = EntryOrPrev::Prev(entry.1.prev, entry.1.visited);
 
-            iter_next!(
-                index,
-                self.metadata,
-                self.queue,
-                self.seen_twice,
-                self.index,
-            );
+            iter_next!(index, self.metadata, self.queue, self.visits, self.index,);
 
             Some(entry)
         } else {
@@ -433,8 +404,8 @@ macro_rules! iter_next {
                 $metadata.tail
             };
 
-            if !$seen.contains_key(&prev) {
-                $seen.insert(prev, false);
+            if $seen[prev] == 0 {
+                $seen[prev] = 1;
                 if $queue[prev].visited() {
                     $index = prev;
                 } else {
@@ -442,11 +413,11 @@ macro_rules! iter_next {
                     break;
                 }
             } else {
-                if $seen.get(&prev).copied().unwrap_or_default() {
+                if $seen[prev] == 2 {
                     $this_index = None;
                     break;
                 }
-                $seen.insert(prev, true);
+                $seen[prev] += 1;
                 if !$queue[prev].visited() {
                     $index = prev;
                 } else {

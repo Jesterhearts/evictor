@@ -132,7 +132,7 @@ pub trait Metadata: Default + private::Sealed {
     ///
     /// The index of the entry that would be evicted next according to
     /// this policy's eviction strategy. For an empty cache, this method's
-    /// behavior is undefined and should not be called.
+    /// behavior is unspecified.
     ///
     /// # Performance
     ///
