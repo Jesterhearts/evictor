@@ -1,7 +1,7 @@
 #![no_main]
 use std::num::NonZeroUsize;
 
-use evictor::SIEVE;
+use evictor::Sieve;
 use fuzz_lib::CacheOperation;
 use libfuzzer_sys::fuzz_target;
 
@@ -15,7 +15,7 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
     let (size, operations) = data;
     let size = size.max(1);
 
-    let mut cache = SIEVE::<u8, u8>::new(NonZeroUsize::new(size as usize).unwrap());
+    let mut cache = Sieve::<u8, u8>::new(NonZeroUsize::new(size as usize).unwrap());
 
     for operation in operations {
         assert!(

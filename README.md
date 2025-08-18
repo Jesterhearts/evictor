@@ -6,22 +6,22 @@
 
 Provides several cache implementations with different eviction policies:
 
-- **LRU (Least Recently Used)** - Evicts the item that was accessed longest ago
-- **MRU (Most Recently Used)** - Evicts the item that was accessed most recently  
-- **LFU (Least Frequently Used)** - Evicts the item that has been accessed least frequently
-- **FIFO (First In, First Out)** - Evicts the item that was inserted earliest, regardless of access
+- **Lru (Least Recently Used)** - Evicts the item that was accessed longest ago
+- **Mru (Most Recently Used)** - Evicts the item that was accessed most recently  
+- **Lfu (Least Frequently Used)** - Evicts the item that has been accessed least frequently
+- **Fifo (First In, First Out)** - Evicts the item that was inserted earliest, regardless of access
   patterns
-- **LIFO (Last In, First Out)** - Evicts the item that was inserted most recently, regardless of
+- **Lifo (Last In, First Out)** - Evicts the item that was inserted most recently, regardless of
   access patterns
 - **Random** - Evicts a randomly selected item when the cache is full
-- **SIEVE** - Efficient eviction using visited bits and hand pointer. See the
-  [paper](https://junchengyang.com/publication/nsdi24-SIEVE.pdf) for details.
+- **Sieve** - Efficient eviction using visited bits and hand pointer. See the
+  [paper](https://junchengyang.com/publication/nsdi24-Sieve.pdf) for details.
 
 All caches are generic over key and value types, with a configurable capacity.
 
 ## Usage
 
-### LRU (Least Recently Used) Cache
+### Lru (Least Recently Used) Cache
 
 Evicts the item that was accessed longest ago:
 
@@ -44,7 +44,7 @@ assert!(!cache.contains_key(&2)); // 2 was evicted (least recently used)
 assert!(cache.contains_key(&1));  // 1 was recently accessed, so kept
 ```
 
-### MRU (Most Recently Used) Cache
+### Mru (Most Recently Used) Cache
 
 Evicts the item that was accessed most recently:
 
@@ -67,7 +67,7 @@ assert!(!cache.contains_key(&1)); // 1 was evicted (most recently used)
 assert!(cache.contains_key(&2));  // 2 was not recently accessed, so kept
 ```
 
-### LFU (Least Frequently Used) Cache
+### Lfu (Least Frequently Used) Cache
 
 Evicts the item that has been accessed least frequently:
 
@@ -94,21 +94,21 @@ assert!(cache.contains_key(&1));  // 1 has highest frequency (2)
 assert!(cache.contains_key(&2));  // 2 has frequency 1
 ```
 
-### FIFO (First In, First Out) Cache
+### Fifo (First In, First Out) Cache
 
 Evicts the item that was inserted earliest, regardless of access patterns:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::FIFO;
+use evictor::Fifo;
 
-let mut cache = FIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+let mut cache = Fifo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
 cache.insert(1, "one".to_string());
 cache.insert(2, "two".to_string());
 cache.insert(3, "three".to_string());
 
-// Access entry (doesn't affect eviction order in FIFO)
+// Access entry (doesn't affect eviction order in Fifo)
 cache.get(&1);
 
 // Insert when full evicts first inserted
@@ -118,21 +118,21 @@ assert!(cache.contains_key(&2));  // 2 was inserted second, so kept
 assert!(cache.contains_key(&3));  // 3 was inserted third, so kept
 ```
 
-### LIFO (Last In, First Out) Cache
+### Lifo (Last In, First Out) Cache
 
 Evicts the item that was inserted most recently, regardless of access patterns:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::LIFO;
+use evictor::Lifo;
 
-let mut cache = LIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+let mut cache = Lifo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
 cache.insert(1, "one".to_string());
 cache.insert(2, "two".to_string());
 cache.insert(3, "three".to_string());
 
-// Access entry (doesn't affect eviction order in LIFO)
+// Access entry (doesn't affect eviction order in Lifo)
 cache.get(&1);
 
 // Insert when full evicts most recently inserted
@@ -167,16 +167,16 @@ assert_eq!(cache.len(), 3);
 assert!(cache.contains_key(&4)); // 4 was just inserted
 ```
 
-### SIEVE Cache
+### Sieve Cache
 
-Efficient eviction using visited bits and hand pointer. SIEVE provides performance comparable to
-LRU. It gives recently accessed items a "second chance" before eviction:
+Efficient eviction using visited bits and hand pointer. Sieve provides performance comparable to
+Lru. It gives recently accessed items a "second chance" before eviction:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::SIEVE;
+use evictor::Sieve;
 
-let mut cache = SIEVE::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+let mut cache = Sieve::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 
 cache.insert(1, "one".to_string());
 cache.insert(2, "two".to_string());
@@ -185,7 +185,7 @@ cache.insert(3, "three".to_string());
 // Access entry to set visited bit (gives it a second chance)
 cache.get(&1);
 
-// Insert when full - SIEVE scans for unvisited entries to evict
+// Insert when full - Sieve scans for unvisited entries to evict
 cache.insert(4, "four".to_string());
 assert!(cache.contains_key(&1));  // 1 gets second chance (was accessed)
 assert!(!cache.contains_key(&2)); // 2 was evicted (not accessed)
@@ -199,7 +199,7 @@ All cache types can be created from iterators. This will set the capacity to the
 the iterator:
 
 ```rust
-use evictor::{Lru, Mru, Lfu, FIFO, LIFO, Random, SIEVE};
+use evictor::{Lru, Mru, Lfu, Fifo, Lifo, Random, Sieve};
 
 let items = vec![
     (1, "one".to_string()),
@@ -211,10 +211,10 @@ let items = vec![
 let lru_cache: Lru<i32, String> = items.clone().into_iter().collect();
 let mru_cache: Mru<i32, String> = items.clone().into_iter().collect();
 let lfu_cache: Lfu<i32, String> = items.clone().into_iter().collect();
-let fifo_cache: FIFO<i32, String> = items.clone().into_iter().collect();
-let lifo_cache: LIFO<i32, String> = items.clone().into_iter().collect();
+let fifo_cache: Fifo<i32, String> = items.clone().into_iter().collect();
+let lifo_cache: Lifo<i32, String> = items.clone().into_iter().collect();
 let random_cache: Random<i32, String> = items.clone().into_iter().collect();
-let sieve_cache: SIEVE<i32, String> = items.into_iter().collect();
+let sieve_cache: Sieve<i32, String> = items.into_iter().collect();
 ```
 
 ### Common Operations
@@ -223,7 +223,7 @@ All cache types support the same operations with identical APIs:
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::Lru; // Could also use Mru, Lfu, FIFO, LIFO, Random, or SIEVE
+use evictor::Lru; // Could also use Mru, Lfu, Fifo, Lifo, Random, or Sieve
 
 let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 

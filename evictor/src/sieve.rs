@@ -8,34 +8,34 @@ use crate::{
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
-pub struct SIEVEPolicy;
+pub struct SievePolicy;
 
-impl private::Sealed for SIEVEPolicy {}
+impl private::Sealed for SievePolicy {}
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SIEVEMetadata {
+pub struct SieveMetadata {
     head: usize,
     tail: usize,
     hand: usize,
 }
 
-impl private::Sealed for SIEVEMetadata {}
+impl private::Sealed for SieveMetadata {}
 
-impl Metadata for SIEVEMetadata {
+impl Metadata for SieveMetadata {
     fn candidate_removal_index(&self) -> usize {
         self.hand
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct SIEVEEntry<V> {
+pub struct SieveEntry<V> {
     value: V,
     prev: Option<usize>,
     next: Option<usize>,
     visited: bool,
 }
 
-impl<V> SIEVEEntry<V> {
+impl<V> SieveEntry<V> {
     fn prev(&self) -> Option<usize> {
         self.prev
     }
@@ -45,11 +45,11 @@ impl<V> SIEVEEntry<V> {
     }
 }
 
-impl<Value> private::Sealed for SIEVEEntry<Value> {}
+impl<Value> private::Sealed for SieveEntry<Value> {}
 
-impl<Value> EntryValue<Value> for SIEVEEntry<Value> {
+impl<Value> EntryValue<Value> for SieveEntry<Value> {
     fn new(value: Value) -> Self {
-        SIEVEEntry {
+        SieveEntry {
             value,
             prev: None,
             next: None,
@@ -70,10 +70,10 @@ impl<Value> EntryValue<Value> for SIEVEEntry<Value> {
     }
 }
 
-impl<Value> Policy<Value> for SIEVEPolicy {
-    type EntryType = SIEVEEntry<Value>;
+impl<Value> Policy<Value> for SievePolicy {
+    type EntryType = SieveEntry<Value>;
     type IntoIter<K> = IntoIter<K, Value>;
-    type MetadataType = SIEVEMetadata;
+    type MetadataType = SieveMetadata;
 
     fn touch_entry<K>(
         mut index: usize,
@@ -266,8 +266,8 @@ impl<Value> Policy<Value> for SIEVEPolicy {
 
 #[derive(Debug, Clone)]
 struct Iter<'q, K, T> {
-    metadata: &'q SIEVEMetadata,
-    queue: &'q indexmap::IndexMap<K, SIEVEEntry<T>, crate::RandomState>,
+    metadata: &'q SieveMetadata,
+    queue: &'q indexmap::IndexMap<K, SieveEntry<T>, crate::RandomState>,
     visits: Vec<u8>,
     index: Option<usize>,
 }
@@ -290,7 +290,7 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
 
 #[derive(Debug)]
 enum EntryOrPrev<K, T> {
-    Entry((K, SIEVEEntry<T>)),
+    Entry((K, SieveEntry<T>)),
     Prev(Option<usize>, bool),
 }
 
@@ -316,8 +316,8 @@ impl<K, T> Default for EntryOrPrev<K, T> {
     }
 }
 
-impl<K, T> From<(K, SIEVEEntry<T>)> for EntryOrPrev<K, T> {
-    fn from(entry: (K, SIEVEEntry<T>)) -> Self {
+impl<K, T> From<(K, SieveEntry<T>)> for EntryOrPrev<K, T> {
+    fn from(entry: (K, SieveEntry<T>)) -> Self {
         EntryOrPrev::Entry(entry)
     }
 }
@@ -325,7 +325,7 @@ impl<K, T> From<(K, SIEVEEntry<T>)> for EntryOrPrev<K, T> {
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct IntoIter<K, T> {
-    metadata: SIEVEMetadata,
+    metadata: SieveMetadata,
     queue: Vec<EntryOrPrev<K, T>>,
     visits: Vec<u8>,
     index: Option<usize>,
@@ -353,14 +353,14 @@ impl<K, V> Iterator for IntoIter<K, V> {
 }
 
 struct IntoEntriesIter<K, T> {
-    metadata: SIEVEMetadata,
+    metadata: SieveMetadata,
     queue: Vec<EntryOrPrev<K, T>>,
     visits: Vec<u8>,
     index: Option<usize>,
 }
 
 impl<K, V> Iterator for IntoEntriesIter<K, V> {
-    type Item = (K, SIEVEEntry<V>);
+    type Item = (K, SieveEntry<V>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(mut index) = self.index {
@@ -438,11 +438,11 @@ mod tests {
         num::NonZeroUsize,
     };
 
-    use crate::SIEVE;
+    use crate::Sieve;
 
     #[test]
     fn test_sieve_basic_operations() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         assert!(cache.is_empty());
         assert_eq!(cache.capacity(), 3);
 
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_sieve_eviction_respects_recent_access() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.get(&1);
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_sieve_peek_does_not_affect_eviction() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.get(&2);
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_sieve_pop() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(10, "a".to_string());
         cache.insert(20, "b".to_string());
 
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_sieve_retain() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(5).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(5).unwrap());
         for i in 0..5 {
             cache.insert(i, format!("v{i}"));
         }
@@ -518,7 +518,7 @@ mod tests {
             (3, "three".to_string()),
             (2, "two_new".to_string()),
         ];
-        let cache: SIEVE<i32, String> = items.into_iter().collect();
+        let cache: Sieve<i32, String> = items.into_iter().collect();
         assert_eq!(cache.len(), 3);
         assert_eq!(cache.capacity(), 3);
         assert_eq!(cache.peek(&1), Some(&"one_new".to_string()));
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_sieve_capacity_one() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(1).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(1).unwrap());
         cache.insert(1, 10);
         assert_eq!(cache.len(), 1);
         cache.insert(2, 20);
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_sieve_empty_cache() {
-        let mut cache: SIEVE<i32, String> = SIEVE::new(NonZeroUsize::new(5).unwrap());
+        let mut cache: Sieve<i32, String> = Sieve::new(NonZeroUsize::new(5).unwrap());
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.capacity(), 5);
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_sieve_get_mut() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_sieve_remove() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn test_sieve_clear() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_sieve_into_iter() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_sieve_visited_bit_behavior() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.insert(3, "three".to_string());
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_sieve_hand_pointer_movement() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_sieve_large_capacity() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(1000).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(1000).unwrap());
 
         for i in 0..500 {
             cache.insert(i, format!("value_{}", i));
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_sieve_extend() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(5).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(5).unwrap());
         cache.insert(1, "one".to_string());
 
         let items = vec![
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_sieve_retain_complex() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(6).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(6).unwrap());
         for i in 1..=6 {
             cache.insert(i, format!("value_{}", i));
         }
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_sieve_stress_eviction_patterns() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
 
         for round in 0..10 {
             let base = round * 3;
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_sieve_clone() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
         cache.get(&1);
@@ -774,12 +774,12 @@ mod tests {
 
     #[test]
     fn test_sieve_debug_format() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
         let debug_str = format!("{:?}", cache);
-        assert!(debug_str.contains("SIEVE"));
+        assert!(debug_str.contains("Sieve"));
 
         assert!(debug_str.len() > 10);
     }
@@ -788,7 +788,7 @@ mod tests {
     fn test_sieve_from_iter_capacity_exceeded() {
         let items: Vec<(i32, String)> = (0..10).map(|i| (i, format!("value_{}", i))).collect();
 
-        let cache: SIEVE<i32, String> = items.into_iter().collect();
+        let cache: Sieve<i32, String> = items.into_iter().collect();
         assert_eq!(cache.capacity(), 10);
         assert_eq!(cache.len(), 10);
 
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_sieve_iterator_stability_during_modification() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(5).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(5).unwrap());
         for i in 0..5 {
             cache.insert(i, format!("val_{}", i));
         }
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn test_sieve_pop_until_empty() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(4).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(4).unwrap());
         cache.insert('a', 1);
         cache.insert('b', 2);
         cache.insert('c', 3);
@@ -842,7 +842,7 @@ mod tests {
     #[test]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_1() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(1).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(1).unwrap());
         cache.insert(255, 0);
         cache.insert(0, 0);
         cache.debug_validate();
@@ -851,7 +851,7 @@ mod tests {
     #[test]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_2() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(0, 5);
         cache.get_or_insert_with(255, |_| 43);
         cache.get_or_insert_with(0, |_| 0);
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_3() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(40, 247);
         cache.get_or_insert_with(7, |_| 255);
         cache.retain(|k, _| k % 2 == 0);
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn fuzz_4() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(0, 255);
         cache.insert(159, 159);
         cache.insert(0, 10);
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn fuzz_5() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 1);
         cache.insert(3, 3);
         cache.insert(5, 5);
@@ -893,7 +893,7 @@ mod tests {
     #[test]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_6() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
         cache.get(&10);
         cache.insert(1, 0);
         cache.peek(&248);
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_7() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
         cache.insert(0, 0);
         cache.insert(1, 0);
         cache.insert(2, 0);
@@ -918,7 +918,7 @@ mod tests {
     #[test]
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn fuzz_8() {
-        let mut cache = SIEVE::new(NonZeroUsize::new(103).unwrap());
+        let mut cache = Sieve::new(NonZeroUsize::new(103).unwrap());
         cache.get_or_insert_with(213, |_| 6);
         cache.get_or_insert_with(255, |_| 1);
         cache.get_or_insert_with(213, |_| 6);

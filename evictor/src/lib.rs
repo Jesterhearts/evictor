@@ -23,13 +23,13 @@ pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
 pub use queue::{
-    FIFOPolicy,
-    LIFOPolicy,
+    FifoPolicy,
+    LifoPolicy,
 };
 #[cfg(feature = "rand")]
 pub use random::RandomPolicy;
 pub use r#ref::Entry;
-pub use sieve::SIEVEPolicy;
+pub use sieve::SievePolicy;
 
 #[cfg(not(feature = "ahash"))]
 type RandomState = std::hash::RandomState;
@@ -45,7 +45,7 @@ mod private {
 /// This trait allows policies to associate additional metadata with cached
 /// values while providing uniform access to the underlying data. Different
 /// eviction policies may store additional information alongside the cached
-/// value (such as access frequency for LFU or access timestamps).
+/// value (such as access frequency for Lfu or access timestamps).
 ///
 /// # Type Parameters
 ///
@@ -54,8 +54,8 @@ mod private {
 /// # Design Notes
 ///
 /// This trait abstracts over the storage requirements of different eviction
-/// policies. Some policies like LRU only need to store the value itself,
-/// while others like LFU need to track additional metadata such as access
+/// policies. Some policies like Lru only need to store the value itself,
+/// while others like Lfu need to track additional metadata such as access
 /// frequency counts. By using this trait, the cache implementation can
 /// remain generic over different storage strategies.
 #[doc(hidden)]
@@ -63,8 +63,8 @@ pub trait EntryValue<T>: private::Sealed {
     /// Creates a new entry containing the given value.
     ///
     /// This method should initialize any policy-specific metadata to
-    /// appropriate default values. For example, an LFU policy might
-    /// initialize access counts to zero, while an LRU policy might not need
+    /// appropriate default values. For example, an Lfu policy might
+    /// initialize access counts to zero, while an Lru policy might not need
     /// any additional initialization.
     ///
     /// # Arguments
@@ -109,9 +109,9 @@ pub trait EntryValue<T>: private::Sealed {
 ///
 /// # Metadata Examples by Policy
 ///
-/// - **LRU/MRU**: Typically maintains a doubly-linked list order via indices
-/// - **LFU**: May track frequency buckets and least-used indices
-/// - **FIFO/LIFO**: Often just tracks head/tail pointers for queue ordering
+/// - **Lru/Mru**: Typically maintains a doubly-linked list order via indices
+/// - **Lfu**: May track frequency buckets and least-used indices
+/// - **Fifo/Lifo**: Often just tracks head/tail pointers for queue ordering
 /// - **Random**: May maintain no additional state or seed information
 ///
 /// # Default Implementation
@@ -142,11 +142,11 @@ pub trait Metadata: Default + private::Sealed {
     ///
     /// # Policy-Specific Behavior
     ///
-    /// - **LRU**: Returns index of least recently used entry
-    /// - **MRU**: Returns index of most recently used entry
-    /// - **LFU**: Returns index of least frequently used entry
-    /// - **FIFO**: Returns index of first inserted entry
-    /// - **LIFO**: Returns index of last inserted entry
+    /// - **Lru**: Returns index of least recently used entry
+    /// - **Mru**: Returns index of most recently used entry
+    /// - **Lfu**: Returns index of least frequently used entry
+    /// - **Fifo**: Returns index of first inserted entry
+    /// - **Lifo**: Returns index of last inserted entry
     /// - **Random**: Returns index of randomly selected entry
     ///
     /// # Usage
@@ -161,7 +161,7 @@ pub trait Metadata: Default + private::Sealed {
 /// Trait defining cache eviction policies.
 ///
 /// This trait encapsulates the behavior of different cache eviction strategies
-/// such as LRU, MRU, LFU, FIFO, LIFO, and Random. Each policy defines how
+/// such as Lru, Mru, Lfu, Fifo, Lifo, and Random. Each policy defines how
 /// entries are prioritized and which entry should be evicted when the cache is
 /// full.
 ///
@@ -181,24 +181,24 @@ pub trait Metadata: Default + private::Sealed {
 /// The crate provides several built-in policy implementations:
 ///
 /// ## Recency-Based Policies
-/// - **LRU (Least Recently Used)**: Evicts entries that haven't been accessed
+/// - **Lru (Least Recently Used)**: Evicts entries that haven't been accessed
 ///   recently
-/// - **MRU (Most Recently Used)**: Evicts entries that were accessed most
+/// - **Mru (Most Recently Used)**: Evicts entries that were accessed most
 ///   recently
 ///
 /// ## Frequency-Based Policies  
-/// - **LFU (Least Frequently Used)**: Evicts entries with the lowest access
+/// - **Lfu (Least Frequently Used)**: Evicts entries with the lowest access
 ///   count
 ///
 /// ## Insertion-Order Policies
-/// - **FIFO (First In, First Out)**: Evicts entries in insertion order
-/// - **LIFO (Last In, First Out)**: Evicts entries in reverse insertion order
+/// - **Fifo (First In, First Out)**: Evicts entries in insertion order
+/// - **Lifo (Last In, First Out)**: Evicts entries in reverse insertion order
 ///
 /// ## Randomized Policies
 /// - **Random**: Evicts entries randomly
 ///
-/// ## SIEVE Policy
-/// - **SIEVE**: Uses a visited bit and hand pointer for efficient eviction with
+/// ## Sieve Policy
+/// - **Sieve**: Uses a visited bit and hand pointer for efficient eviction with
 ///   second-chance semantics
 ///
 /// # Error Handling
@@ -284,12 +284,12 @@ pub trait Policy<T>: private::Sealed {
     /// starting with the entry that would be evicted first (the "tail" of the
     /// eviction order). The specific ordering depends on the policy:
     ///
-    /// - **LRU**: Iterates from least recently used to most recently used
-    /// - **MRU**: Iterates from most recently used to least recently used
-    /// - **LFU**: Iterates from least frequently used to most frequently used,
+    /// - **Lru**: Iterates from least recently used to most recently used
+    /// - **Mru**: Iterates from most recently used to least recently used
+    /// - **Lfu**: Iterates from least frequently used to most frequently used,
     ///   with ties broken by insertion/access order
-    /// - **FIFO**: Iterates from first inserted to last inserted
-    /// - **LIFO**: Iterates from last inserted to first inserted
+    /// - **Fifo**: Iterates from first inserted to last inserted
+    /// - **Lifo**: Iterates from last inserted to first inserted
     /// - **Random**: Iterates in random order (debug) or arbitrary order
     ///   (release)
     ///
@@ -315,14 +315,14 @@ pub trait Policy<T>: private::Sealed {
     /// T)` pairs. The iteration order depends on the specific eviction
     /// policy:
     ///
-    /// - **LRU**: Items are yielded from least recently used to most recently
+    /// - **Lru**: Items are yielded from least recently used to most recently
     ///   used
-    /// - **MRU**: Items are yielded from most recently used to least recently
+    /// - **Mru**: Items are yielded from most recently used to least recently
     ///   used
-    /// - **LFU**: Items are yielded from least frequently used to most
+    /// - **Lfu**: Items are yielded from least frequently used to most
     ///   frequently used
-    /// - **FIFO**: Items are yielded from first inserted to last inserted
-    /// - **LIFO**: Items are yielded from last inserted to first inserted
+    /// - **Fifo**: Items are yielded from first inserted to last inserted
+    /// - **Lifo**: Items are yielded from last inserted to first inserted
     /// - **Random**: Items are yielded in an arbitrary order.
     ///
     /// # Parameters
@@ -384,7 +384,7 @@ pub trait Policy<T>: private::Sealed {
         T: std::fmt::Debug;
 }
 
-/// A least-recently-used (LRU) cache.
+/// A least-recently-used (Lru) cache.
 ///
 /// Evicts the entry that was accessed longest ago when the cache is full.
 /// This policy is ideal for workloads where recently accessed items are
@@ -410,7 +410,7 @@ pub trait Policy<T>: private::Sealed {
 /// cache.get(&1); // Mark as recently used
 /// cache.insert(4, "four".to_string()); // Evicts key 2
 ///
-/// // `into_iter` returns the items in eviction order, which is LRU first.
+/// // `into_iter` returns the items in eviction order, which is Lru first.
 /// assert_eq!(
 ///     cache.into_iter().collect::<Vec<_>>(),
 ///     [
@@ -422,7 +422,10 @@ pub trait Policy<T>: private::Sealed {
 /// ```
 pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 
-/// A most-recently-used (MRU) cache.
+/// See [`Lru`].
+pub type LRU<Key, Value> = Lru<Key, Value>;
+
+/// A most-recently-used (Mru) cache.
 ///
 /// Evicts the entry that was accessed most recently when the cache is full.
 /// This policy can be useful for workloads with sequential access patterns
@@ -448,7 +451,7 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// cache.get(&1); // Mark as recently used
 /// cache.insert(4, "four".to_string()); // Evicts key 1
 ///
-/// // `into_iter` returns the items in eviction order, which is MRU first.
+/// // `into_iter` returns the items in eviction order, which is Mru first.
 /// assert_eq!(
 ///     cache.into_iter().collect::<Vec<_>>(),
 ///     [
@@ -460,7 +463,10 @@ pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 /// ```
 pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 
-/// A least-frequently-used (LFU) cache.
+/// See [`Mru`].
+pub type MRU<Key, Value> = Mru<Key, Value>;
+
+/// A least-frequently-used (Lfu) cache.
 ///
 /// This implementation uses frequency buckets with doubly-linked lists to
 /// achieve O(1) time complexity for all operations.
@@ -497,7 +503,7 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// // Insert new item - this will evict the least frequently used (key 4)
 /// cache.insert(5, "five".to_string());
 ///
-/// // `into_iter` returns the items in eviction order, which is LFU first, with LRU tiebreaking.
+/// // `into_iter` returns the items in eviction order, which is Lfu first, with Lru tiebreaking.
 /// assert_eq!(
 ///     cache.into_iter().collect::<Vec<_>>(),
 ///     [
@@ -510,7 +516,10 @@ pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 /// ```
 pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 
-/// A first-in-first-out (FIFO) cache.
+/// See [`Lfu`].
+pub type LFU<Key, Value> = Lfu<Key, Value>;
+
+/// A first-in-first-out (Fifo) cache.
 ///
 /// Evicts the entry that was inserted earliest when the cache is full.
 /// This policy treats the cache as a queue where the oldest inserted
@@ -526,17 +535,17 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 /// ```
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::FIFO;
+/// use evictor::Fifo;
 ///
-/// let mut cache = FIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = Fifo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
 ///
-/// cache.get(&1); // Access key 1 - this doesn't affect eviction order in FIFO
+/// cache.get(&1); // Access key 1 - this doesn't affect eviction order in Fifo
 /// cache.insert(4, "four".to_string()); // Evicts key 1 (first inserted)
 ///
-/// // `into_iter` returns the items in eviction order, which is FIFO.
+/// // `into_iter` returns the items in eviction order, which is Fifo.
 /// assert_eq!(
 ///     cache.into_iter().collect::<Vec<_>>(),
 ///     [
@@ -546,9 +555,12 @@ pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 ///     ]
 /// );
 /// ```
-pub type FIFO<Key, Value> = Cache<Key, Value, FIFOPolicy>;
+pub type Fifo<Key, Value> = Cache<Key, Value, FifoPolicy>;
 
-/// A last-in-first-out (LIFO) cache.
+/// See [`Fifo`].
+pub type FIFO<Key, Value> = Fifo<Key, Value>;
+
+/// A last-in-first-out (Lifo) cache.
 ///
 /// Evicts the entry that was inserted most recently when the cache is full.
 /// This policy treats the cache as a stack where the most recently inserted
@@ -564,17 +576,17 @@ pub type FIFO<Key, Value> = Cache<Key, Value, FIFOPolicy>;
 /// ```
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::LIFO;
+/// use evictor::Lifo;
 ///
-/// let mut cache = LIFO::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = Lifo::<i32, String>::new(NonZeroUsize::new(3).unwrap());
 /// cache.insert(1, "one".to_string());
 /// cache.insert(2, "two".to_string());
 /// cache.insert(3, "three".to_string());
 ///
-/// cache.get(&1); // Access key 1 - this doesn't affect eviction order in LIFO
+/// cache.get(&1); // Access key 1 - this doesn't affect eviction order in Lifo
 /// cache.insert(4, "four".to_string()); // Evicts key 3 (most recently inserted)
 ///
-/// // `into_iter` returns the items in eviction order, which is LIFO.
+/// // `into_iter` returns the items in eviction order, which is Lifo.
 /// assert_eq!(
 ///     cache.into_iter().collect::<Vec<_>>(),
 ///     [
@@ -584,7 +596,10 @@ pub type FIFO<Key, Value> = Cache<Key, Value, FIFOPolicy>;
 ///     ]
 /// );
 /// ```
-pub type LIFO<Key, Value> = Cache<Key, Value, LIFOPolicy>;
+pub type Lifo<Key, Value> = Cache<Key, Value, LifoPolicy>;
+
+/// See [`Lifo`].
+pub type LIFO<Key, Value> = Lifo<Key, Value>;
 
 /// A random eviction cache.
 ///
@@ -626,18 +641,18 @@ pub type LIFO<Key, Value> = Cache<Key, Value, LIFOPolicy>;
 #[cfg(feature = "rand")]
 pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 
-/// A SIEVE cache implementing the algorithm outlined in the paper
-/// [SIEVE is Simpler than LRU](https://junchengyang.com/publication/nsdi24-SIEVE.pdf).
+/// A Sieve cache implementing the algorithm outlined in the paper
+/// [Sieve is Simpler than Lru](https://junchengyang.com/publication/nsdi24-Sieve.pdf).
 ///
-/// SIEVE is a simple and efficient eviction policy that provides performance
-/// comparable to LRU while being significantly easier to implement and
+/// Sieve is a simple and efficient eviction policy that provides performance
+/// comparable to Lru while being significantly easier to implement and
 /// maintain. It uses a "visited" bit per entry and a hand pointer that scans
 /// for eviction candidates, giving recently accessed items a "second chance"
 /// before eviction.
 ///
 /// # Algorithm Overview
 ///
-/// SIEVE maintains:
+/// Sieve maintains:
 /// - A **visited bit** for each cache entry (initially false)
 /// - A **hand pointer** that moves through entries looking for eviction
 ///   candidates
@@ -673,9 +688,9 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// ```rust
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::SIEVE;
+/// use evictor::Sieve;
 ///
-/// let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
 /// cache.insert(1, "one");
 /// cache.insert(2, "two");
 /// cache.insert(3, "three");
@@ -693,9 +708,9 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// ```rust
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::SIEVE;
+/// use evictor::Sieve;
 ///
-/// let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+/// let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
 /// cache.insert("A", 1);
 /// cache.insert("B", 2);
 ///
@@ -718,9 +733,9 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// ```rust
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::SIEVE;
+/// use evictor::Sieve;
 ///
-/// let mut cache = SIEVE::new(NonZeroUsize::new(2).unwrap());
+/// let mut cache = Sieve::new(NonZeroUsize::new(2).unwrap());
 /// cache.insert(1, "one");
 /// cache.insert(2, "two");
 ///
@@ -740,9 +755,9 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// ```rust
 /// use std::num::NonZeroUsize;
 ///
-/// use evictor::SIEVE;
+/// use evictor::Sieve;
 ///
-/// let mut cache = SIEVE::new(NonZeroUsize::new(3).unwrap());
+/// let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
 /// cache.insert("A", 1);
 /// cache.insert("B", 2);
 /// cache.insert("C", 3);
@@ -755,16 +770,19 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// // First item should match tail() (next eviction candidate)
 /// assert_eq!(cache.tail().unwrap(), cache.iter().next().unwrap());
 /// ```
-pub type SIEVE<Key, Value> = Cache<Key, Value, SIEVEPolicy>;
+pub type Sieve<Key, Value> = Cache<Key, Value, SievePolicy>;
+
+/// See [`Sieve`].
+pub type SIEVE<Key, Value> = Sieve<Key, Value>;
 
 /// A generic cache implementation with configurable eviction policies.
 ///
-/// `Cache` is the underlying generic structure that powers LRU, MRU, LFU,
-/// FIFO, LIFO, Random, and SIEVE caches. The eviction behavior is determined by
+/// `Cache` is the underlying generic structure that powers Lru, Mru, Lfu,
+/// Fifo, Lifo, Random, and Sieve caches. The eviction behavior is determined by
 /// the `PolicyType` parameter, which must implement the `Policy` trait.
 ///
 /// For most use cases, you should use the type aliases [`Lru`], [`Mru`],
-/// [`Lfu`], [`FIFO`], [`LIFO`], [`Random`], or [`SIEVE`] instead of using
+/// [`Lfu`], [`Fifo`], [`Lifo`], [`Random`], or [`Sieve`] instead of using
 /// `Cache` directly.
 ///
 /// # Type Parameters
@@ -984,13 +1002,13 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// This method provides access to the entry at the "tail" of the eviction
     /// order without affecting the cache state. The specific entry returned
     /// depends on the policy:
-    /// - LRU: Returns the least recently used entry
-    /// - MRU: Returns the most recently used entry
-    /// - LFU: Returns the least frequently used entry
-    /// - FIFO: Returns the first inserted entry
-    /// - LIFO: Returns the last inserted entry
+    /// - Lru: Returns the least recently used entry
+    /// - Mru: Returns the most recently used entry
+    /// - Lfu: Returns the least frequently used entry
+    /// - Fifo: Returns the first inserted entry
+    /// - Lifo: Returns the last inserted entry
     /// - Random: Returns a randomly selected entry
-    /// - SIEVE: Returns the entry at the hand position, which is the current
+    /// - Sieve: Returns the entry at the hand position, which is the current
     ///   eviction candidate. If this entry has been accessed (visited=true), it
     ///   will get a second chance and the hand will advance to find the next
     ///   unvisited entry for actual eviction.
@@ -1013,7 +1031,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert(1, "one".to_string());
     /// cache.insert(2, "two".to_string());
     ///
-    /// // In LRU, tail returns the least recently used
+    /// // In Lru, tail returns the least recently used
     /// let (key, value) = cache.tail().unwrap();
     /// assert_eq!(key, &1);
     /// assert_eq!(value, &"one".to_string());
@@ -1359,11 +1377,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// This method removes and returns the entry at the "tail" of the eviction
     /// order. The specific entry removed depends on the policy:
-    /// - LRU: Removes the least recently used entry
-    /// - MRU: Removes the most recently used entry
-    /// - LFU: Removes the least frequently used entry
-    /// - FIFO: Removes the first inserted entry
-    /// - LIFO: Removes the last inserted entry
+    /// - Lru: Removes the least recently used entry
+    /// - Mru: Removes the most recently used entry
+    /// - Lfu: Removes the least frequently used entry
+    /// - Fifo: Removes the first inserted entry
+    /// - Lifo: Removes the last inserted entry
     /// - Random: Removes a randomly selected entry
     ///
     /// # Returns
@@ -1508,32 +1526,32 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// The specific iteration order depends on the cache's eviction policy:
     ///
-    /// ## LRU (Least Recently Used)
+    /// ## Lru (Least Recently Used)
     /// Iterates from **least recently used** to **most recently used**:
     /// - First yielded: The entry accessed longest ago (would be evicted first)
     /// - Last yielded: The entry accessed most recently (would be evicted last)
     ///
-    /// ## MRU (Most Recently Used)  
+    /// ## Mru (Most Recently Used)  
     /// Iterates from **most recently used** to **least recently used**:
     /// - First yielded: The entry accessed most recently (would be evicted
     ///   first)
     /// - Last yielded: The entry accessed longest ago (would be evicted last)
     ///
-    /// ## LFU (Least Frequently Used)
+    /// ## Lfu (Least Frequently Used)
     /// Iterates from **least frequently used** to **most frequently used**:
     /// - Entries are ordered by access frequency (lower frequency first)
     /// - Ties are broken by insertion/access order within frequency buckets
     /// - First yielded: Entry with lowest access count (would be evicted first)
     /// - Last yielded: Entry with highest access count (would be evicted last)
     ///
-    /// ## FIFO (First In, First Out)
+    /// ## Fifo (First In, First Out)
     /// Iterates from **first inserted** to **last inserted**:
     /// - Entries are ordered by insertion time
     /// - First yielded: Entry inserted earliest (would be evicted first)
     /// - Last yielded: Entry inserted most recently (would be evicted last)
     /// - Access patterns do not affect iteration order
     ///
-    /// ## LIFO (Last In, First Out)
+    /// ## Lifo (Last In, First Out)
     /// Iterates from **last inserted** to **first inserted**:
     /// - Entries are ordered by insertion time in reverse
     /// - First yielded: Entry inserted most recently (would be evicted first)
@@ -1549,7 +1567,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - The eviction order itself is always random regardless of iteration
     ///   order
     ///
-    /// ## SIEVE
+    /// ## Sieve
     /// Iterates in **eviction order assuming no modifications**:
     /// - Starts from the current hand position (next eviction candidate)
     /// - Simulates the eviction scanning process: skips visited entries once,
@@ -1561,8 +1579,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// # Time Complexity
     /// - Creating the iterator: **O(1)**
     /// - Iterating through all entries: **O(n)** where n is the cache size
-    /// - Each `next()` call: **O(1)** for LRU/MRU/FIFO/LIFO/Random, **O(1)
-    ///   amortized** for LFU, **O(1) with higher constant overhead** for SIEVE
+    /// - Each `next()` call: **O(1)** for Lru/Mru/Fifo/Lifo/Random, **O(1)
+    ///   amortized** for Lfu, **O(1) with higher constant overhead** for Sieve
     ///
     /// # Examples
     ///
@@ -1577,7 +1595,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert("B", 2);
     /// cache.insert("C", 3);
     ///
-    /// // LRU: Iterates from least recently used to most recently used
+    /// // Lru: Iterates from least recently used to most recently used
     /// let items: Vec<_> = cache.iter().collect();
     /// assert_eq!(items, [(&"A", &1), (&"B", &2), (&"C", &3)]);
     /// ```
@@ -1601,7 +1619,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(items, [(&"B", &2), (&"C", &3), (&"A", &1)]);
     /// ```
     ///
-    /// ## MRU Policy Example
+    /// ## Mru Policy Example
     /// ```rust
     /// use std::num::NonZeroUsize;
     ///
@@ -1612,12 +1630,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert("B", 2);
     /// cache.insert("C", 3);
     ///
-    /// // MRU: Iterates from most recently used to least recently used
+    /// // Mru: Iterates from most recently used to least recently used
     /// let items: Vec<_> = cache.iter().collect();
     /// assert_eq!(items, [(&"C", &3), (&"B", &2), (&"A", &1)]);
     /// ```
     ///
-    /// ## LFU Policy Example
+    /// ## Lfu Policy Example
     /// ```rust
     /// use std::num::NonZeroUsize;
     ///
@@ -1633,7 +1651,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.get(&"A");
     /// cache.get(&"B"); // Access "B" once
     ///
-    /// // LFU: "C" (freq=0), "B" (freq=1), "A" (freq=2)
+    /// // Lfu: "C" (freq=0), "B" (freq=1), "A" (freq=2)
     /// let items: Vec<_> = cache.iter().collect();
     /// assert_eq!(items, [(&"C", &3), (&"B", &2), (&"A", &1)]);
     /// ```
@@ -1667,13 +1685,13 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// # Eviction Order
     ///
     /// The iteration order depends on the cache's eviction policy:
-    /// - **LRU**: Keys from least recently used to most recently used
-    /// - **MRU**: Keys from most recently used to least recently used
-    /// - **LFU**: Keys from least frequently used to most frequently used
-    /// - **FIFO**: Keys from first inserted to last inserted
-    /// - **LIFO**: Keys from last inserted to first inserted
+    /// - **Lru**: Keys from least recently used to most recently used
+    /// - **Mru**: Keys from most recently used to least recently used
+    /// - **Lfu**: Keys from least frequently used to most frequently used
+    /// - **Fifo**: Keys from first inserted to last inserted
+    /// - **Lifo**: Keys from last inserted to first inserted
     /// - **Random**: Keys in random order (debug) or arbitrary order (release)
-    /// - **SIEVE**: Keys in eviction order.
+    /// - **Sieve**: Keys in eviction order.
     ///
     /// # Examples
     ///
@@ -1687,7 +1705,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert("B", 2);
     /// cache.insert("C", 3);
     ///
-    /// // Get keys in LRU order (least recently used first)
+    /// // Get keys in Lru order (least recently used first)
     /// let keys: Vec<_> = cache.keys().collect();
     /// assert_eq!(keys, [&"A", &"B", &"C"]);
     /// ```
@@ -1704,14 +1722,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// # Eviction Order
     ///
     /// The iteration order depends on the cache's eviction policy:
-    /// - **LRU**: Values from least recently used to most recently used
-    /// - **MRU**: Values from most recently used to least recently used
-    /// - **LFU**: Values from least frequently used to most frequently used
-    /// - **FIFO**: Values from first inserted to last inserted
-    /// - **LIFO**: Values from last inserted to first inserted
+    /// - **Lru**: Values from least recently used to most recently used
+    /// - **Mru**: Values from most recently used to least recently used
+    /// - **Lfu**: Values from least frequently used to most frequently used
+    /// - **Fifo**: Values from first inserted to last inserted
+    /// - **Lifo**: Values from last inserted to first inserted
     /// - **Random**: Values in random order (debug) or arbitrary order
     ///   (release)
-    /// - **SIEVE**: Values following eviction order.
+    /// - **Sieve**: Values following eviction order.
     ///
     /// # Examples
     ///
@@ -1725,7 +1743,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert("B", 2);
     /// cache.insert("C", 3);
     ///
-    /// // Get values in LRU order (least recently used first)
+    /// // Get values in Lru order (least recently used first)
     /// let values: Vec<_> = cache.values().collect();
     /// assert_eq!(values, [&1, &2, &3]);
     /// ```
@@ -1816,13 +1834,13 @@ impl<K, V, PolicyType: Policy<V>> IntoIterator for Cache<K, V, PolicyType> {
     /// allowing caches to be consumed and converted into iterators. The
     /// iteration order follows the eviction policy's ordering:
     ///
-    /// - **LRU**: From least recently used to most recently used
-    /// - **MRU**: From most recently used to least recently used
-    /// - **LFU**: From least frequently used to most frequently used
-    /// - **FIFO**: From first inserted to last inserted
-    /// - **LIFO**: From last inserted to first inserted
+    /// - **Lru**: From least recently used to most recently used
+    /// - **Mru**: From most recently used to least recently used
+    /// - **Lfu**: From least frequently used to most frequently used
+    /// - **Fifo**: From first inserted to last inserted
+    /// - **Lifo**: From last inserted to first inserted
     /// - **Random**: In random order (debug) or arbitrary order (release)
-    /// - **SIEVE**: Following eviction order.
+    /// - **Sieve**: Following eviction order.
     ///
     /// # Returns
     /// An iterator that yields `(K, V)` pairs in eviction order, consuming the
@@ -1994,10 +2012,10 @@ mod tests {
 
         use crate::{
             Cache,
-            FIFOPolicy,
+            FifoPolicy,
         };
 
-        let mut cache = Cache::<i32, String, FIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Cache::<i32, String, FifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -2013,10 +2031,10 @@ mod tests {
 
         use crate::{
             Cache,
-            LIFOPolicy,
+            LifoPolicy,
         };
 
-        let mut cache = Cache::<i32, String, LIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Cache::<i32, String, LifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -2051,10 +2069,10 @@ mod tests {
 
         use crate::{
             Cache,
-            SIEVEPolicy,
+            SievePolicy,
         };
 
-        let mut cache = Cache::<i32, String, SIEVEPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Cache::<i32, String, SievePolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -2127,10 +2145,10 @@ mod tests {
 
         use crate::{
             Cache,
-            FIFOPolicy,
+            FifoPolicy,
         };
 
-        let mut cache = Cache::<i32, String, FIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Cache::<i32, String, FifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -2146,10 +2164,10 @@ mod tests {
 
         use crate::{
             Cache,
-            LIFOPolicy,
+            LifoPolicy,
         };
 
-        let mut cache = Cache::<i32, String, LIFOPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Cache::<i32, String, LifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 
@@ -2184,10 +2202,10 @@ mod tests {
 
         use crate::{
             Cache,
-            SIEVEPolicy,
+            SievePolicy,
         };
 
-        let mut cache = Cache::<i32, String, SIEVEPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let mut cache = Cache::<i32, String, SievePolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
 

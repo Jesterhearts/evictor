@@ -272,8 +272,8 @@ impl<K, V, P: Policy<V>> Entry<'_, K, V, P> {
     /// - Immediately marks the entry as modified (dirty flag set to `true`)
     /// - When the `Entry` is dropped, the cache's eviction order will be
     ///   updated
-    /// - The specific eviction order update depends on the cache policy (LRU,
-    ///   MRU, LFU)
+    /// - The specific eviction order update depends on the cache policy (Lru,
+    ///   Mru, Lfu)
     ///
     /// # Examples
     ///

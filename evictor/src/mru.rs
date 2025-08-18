@@ -374,7 +374,7 @@ mod tests {
             mru.insert(i, i * 10);
         }
 
-        // MRU cache should contain the 3 most recently inserted items
+        // Mru cache should contain the 3 most recently inserted items
         // but since we accessed item 10, it's not in the expected order
         assert_eq!(
             mru.into_iter().collect::<Vec<_>>(),
