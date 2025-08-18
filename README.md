@@ -15,7 +15,7 @@ Provides several cache implementations with different eviction policies:
   access patterns
 - **Random** - Evicts a randomly selected item when the cache is full
 - **Sieve** - Efficient eviction using visited bits and hand pointer. See the
-  [paper](https://junchengyang.com/publication/nsdi24-Sieve.pdf) for details.
+  [paper](https://junchengyang.com/publication/nsdi24-SIEVE.pdf) for details.
 
 All caches are generic over key and value types, with a configurable capacity.
 

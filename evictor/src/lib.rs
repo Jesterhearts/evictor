@@ -642,7 +642,7 @@ pub type LIFO<Key, Value> = Lifo<Key, Value>;
 pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 
 /// A Sieve cache implementing the algorithm outlined in the paper
-/// [Sieve is Simpler than Lru](https://junchengyang.com/publication/nsdi24-Sieve.pdf).
+/// [Sieve is Simpler than Lru](https://junchengyang.com/publication/nsdi24-SIEVE.pdf).
 ///
 /// Sieve is a simple and efficient eviction policy that provides performance
 /// comparable to Lru while being significantly easier to implement and
