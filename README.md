@@ -67,7 +67,7 @@ sieve.insert(3, "z");  // evicts 2 (unvisited)
 
 ### Building from iterators
 
-`FromIterator` collects all pairs setting capacity to the nubmer of unique items in the iterator
+`FromIterator` collects all pairs setting capacity to the number of unique items in the iterator
 (minimum 1).
 
 ```rust
