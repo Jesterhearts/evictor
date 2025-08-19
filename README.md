@@ -109,7 +109,7 @@ patterns.
 
 ### Safety & Guarantees
 
-* No unsafe code in public API surface (only library dependencies may use it).
+* No unsafe code in library (although e.g. indexmap may use some).
 
 ### License
 
