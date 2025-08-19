@@ -1,4 +1,3 @@
-generic over key + value, and have O(1) average insert/get/remove.
 # evictor
 
 [![Crates.io](https://img.shields.io/crates/v/evictor.svg)](https://crates.io/crates/evictor)
