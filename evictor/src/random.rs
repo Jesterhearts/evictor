@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 #[cfg(debug_assertions)]
 use rand::seq::SliceRandom;
 
@@ -48,14 +49,18 @@ pub struct RandomMetadata {
 
 impl private::Sealed for RandomMetadata {}
 
-impl Metadata for RandomMetadata {
-    fn candidate_removal_index(&self) -> usize {
+impl<T> Metadata<T> for RandomMetadata {
+    type EntryType = RandomEntry<T>;
+
+    fn candidate_removal_index<K>(
+        &self,
+        _: &IndexMap<K, RandomEntry<T>, crate::RandomState>,
+    ) -> usize {
         rand::random_range(0..self.num_entries.max(1))
     }
 }
 
 impl<T> Policy<T> for RandomPolicy {
-    type EntryType = RandomEntry<T>;
     type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = RandomMetadata;
 
@@ -63,10 +68,10 @@ impl<T> Policy<T> for RandomPolicy {
         mut index: usize,
         make_room: bool,
         metadata: &mut Self::MetadataType,
-        queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: &mut IndexMap<K, RandomEntry<T>, crate::RandomState>,
     ) -> usize {
         if make_room {
-            debug_assert_ne!(metadata.candidate_removal_index(), index);
+            debug_assert_ne!(metadata.candidate_removal_index(queue), index);
             let (removed, _) = Self::evict_entry(metadata, queue);
             if index == queue.len() {
                 index = removed;
@@ -79,8 +84,8 @@ impl<T> Policy<T> for RandomPolicy {
     fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-    ) -> Option<(K, Self::EntryType)> {
+        queue: &mut IndexMap<K, RandomEntry<T>, crate::RandomState>,
+    ) -> Option<(K, RandomEntry<T>)> {
         let result = queue.swap_remove_index(index);
         metadata.num_entries = queue.len();
         result
@@ -88,7 +93,7 @@ impl<T> Policy<T> for RandomPolicy {
 
     fn iter<'q, K>(
         _metadata: &'q Self::MetadataType,
-        queue: &'q indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: &'q IndexMap<K, RandomEntry<T>, crate::RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
@@ -111,7 +116,7 @@ impl<T> Policy<T> for RandomPolicy {
 
     fn into_iter<K>(
         _metadata: Self::MetadataType,
-        queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: IndexMap<K, RandomEntry<T>, crate::RandomState>,
     ) -> Self::IntoIter<K> {
         #[cfg(debug_assertions)]
         let mut order = (0..queue.len()).collect::<Vec<_>>();
@@ -131,8 +136,8 @@ impl<T> Policy<T> for RandomPolicy {
 
     fn into_entries<K>(
         _metadata: Self::MetadataType,
-        queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        queue: IndexMap<K, RandomEntry<T>, crate::RandomState>,
+    ) -> impl Iterator<Item = (K, RandomEntry<T>)> {
         #[cfg(debug_assertions)]
         let mut order = (0..queue.len()).collect::<Vec<_>>();
         #[cfg(debug_assertions)]
@@ -152,7 +157,7 @@ impl<T> Policy<T> for RandomPolicy {
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn debug_validate<K: std::hash::Hash + Eq>(
         _: &Self::MetadataType,
-        _: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        _: &IndexMap<K, RandomEntry<T>, crate::RandomState>,
     ) {
         // Nothing to do
     }
@@ -161,7 +166,7 @@ impl<T> Policy<T> for RandomPolicy {
 struct Iter<'q, K, T> {
     #[cfg(debug_assertions)]
     order: Vec<usize>,
-    queue: &'q indexmap::IndexMap<K, RandomEntry<T>, crate::RandomState>,
+    queue: &'q IndexMap<K, RandomEntry<T>, crate::RandomState>,
     index: usize,
 }
 

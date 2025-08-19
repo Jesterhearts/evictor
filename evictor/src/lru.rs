@@ -59,14 +59,15 @@ pub struct LruMetadata {
 
 impl private::Sealed for LruMetadata {}
 
-impl Metadata for LruMetadata {
-    fn candidate_removal_index(&self) -> usize {
+impl<T> Metadata<T> for LruMetadata {
+    type EntryType = LruEntry<T>;
+
+    fn candidate_removal_index<K>(&self, _: &IndexMap<K, LruEntry<T>, RandomState>) -> usize {
         self.head
     }
 }
 
 impl<T> Policy<T> for LruPolicy {
-    type EntryType = LruEntry<T>;
     type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = LruMetadata;
 
@@ -74,13 +75,13 @@ impl<T> Policy<T> for LruPolicy {
         mut index: usize,
         make_room: bool,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
+        queue: &mut IndexMap<K, LruEntry<T>, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
         }
 
-        let removal_index = metadata.candidate_removal_index();
+        let removal_index = metadata.candidate_removal_index(queue);
         #[cfg(debug_assertions)]
         if make_room {
             assert_ne!(removal_index, index);
@@ -130,14 +131,14 @@ impl<T> Policy<T> for LruPolicy {
     fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> Option<(K, Self::EntryType)> {
+        queue: &mut IndexMap<K, LruEntry<T>, RandomState>,
+    ) -> Option<(K, LruEntry<T>)> {
         swap_remove_ll_entry!(index, metadata, queue)
     }
 
     fn iter<'q, K>(
         metadata: &'q Self::MetadataType,
-        queue: &'q IndexMap<K, Self::EntryType, RandomState>,
+        queue: &'q IndexMap<K, LruEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
@@ -150,7 +151,7 @@ impl<T> Policy<T> for LruPolicy {
 
     fn into_iter<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, Self::EntryType, RandomState>,
+        queue: IndexMap<K, LruEntry<T>, RandomState>,
     ) -> IntoIter<K, T> {
         IntoIter {
             queue: queue.into_iter().map(Some).collect(),
@@ -160,8 +161,8 @@ impl<T> Policy<T> for LruPolicy {
 
     fn into_entries<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, Self::EntryType, RandomState>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        queue: IndexMap<K, LruEntry<T>, RandomState>,
+    ) -> impl Iterator<Item = (K, LruEntry<T>)> {
         IntoEntriesIter {
             queue: queue.into_iter().map(Some).collect(),
             index: Some(metadata.head),
@@ -171,7 +172,7 @@ impl<T> Policy<T> for LruPolicy {
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &IndexMap<K, Self::EntryType, RandomState>,
+        queue: &IndexMap<K, LruEntry<T>, RandomState>,
     ) where
         T: std::fmt::Debug,
     {

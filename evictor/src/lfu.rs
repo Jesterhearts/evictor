@@ -65,8 +65,10 @@ pub struct LfuMetadata {
 
 impl private::Sealed for LfuMetadata {}
 
-impl Metadata for LfuMetadata {
-    fn candidate_removal_index(&self) -> usize {
+impl<T> Metadata<T> for LfuMetadata {
+    type EntryType = LfuEntry<T>;
+
+    fn candidate_removal_index<K>(&self, _: &IndexMap<K, LfuEntry<T>, RandomState>) -> usize {
         self.frequency_head_tail
             .get_index(self.head_bucket)
             .map_or(0, |(_, bucket)| bucket.tail)
@@ -74,7 +76,6 @@ impl Metadata for LfuMetadata {
 }
 
 impl<T> Policy<T> for LfuPolicy {
-    type EntryType = LfuEntry<T>;
     type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = LfuMetadata;
 
@@ -82,13 +83,13 @@ impl<T> Policy<T> for LfuPolicy {
         mut index: usize,
         make_room: bool,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
+        queue: &mut IndexMap<K, LfuEntry<T>, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
         }
 
-        let removal_index = metadata.candidate_removal_index();
+        let removal_index = metadata.candidate_removal_index(queue);
         #[cfg(debug_assertions)]
         if make_room {
             assert_ne!(removal_index, index);
@@ -178,8 +179,8 @@ impl<T> Policy<T> for LfuPolicy {
     fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> Option<(K, Self::EntryType)> {
+        queue: &mut IndexMap<K, LfuEntry<T>, RandomState>,
+    ) -> Option<(K, LfuEntry<T>)> {
         if index >= queue.len() {
             return None;
         }
@@ -215,7 +216,7 @@ impl<T> Policy<T> for LfuPolicy {
 
     fn iter<'q, K>(
         metadata: &'q LfuMetadata,
-        queue: &'q IndexMap<K, Self::EntryType, RandomState>,
+        queue: &'q IndexMap<K, LfuEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
@@ -234,7 +235,7 @@ impl<T> Policy<T> for LfuPolicy {
 
     fn into_iter<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, Self::EntryType, RandomState>,
+        queue: IndexMap<K, LfuEntry<T>, RandomState>,
     ) -> IntoIter<K, T> {
         let index = metadata
             .frequency_head_tail
@@ -250,8 +251,8 @@ impl<T> Policy<T> for LfuPolicy {
 
     fn into_entries<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, Self::EntryType, RandomState>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        queue: IndexMap<K, LfuEntry<T>, RandomState>,
+    ) -> impl Iterator<Item = (K, LfuEntry<T>)> {
         let index = metadata
             .frequency_head_tail
             .get_index(metadata.head_bucket)
@@ -268,7 +269,7 @@ impl<T> Policy<T> for LfuPolicy {
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn debug_validate<K: std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &IndexMap<K, Self::EntryType, RandomState>,
+        queue: &IndexMap<K, LfuEntry<T>, RandomState>,
     ) where
         T: std::fmt::Debug,
     {

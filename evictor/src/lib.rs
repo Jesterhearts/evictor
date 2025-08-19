@@ -13,7 +13,6 @@ mod sieve;
 mod utils;
 
 use std::{
-    fmt::Debug,
     hash::Hash,
     num::NonZeroUsize,
 };
@@ -120,7 +119,10 @@ pub trait EntryValue<T>: private::Sealed {
 /// when creating a new cache. The default state should represent an empty
 /// cache with no entries.
 #[doc(hidden)]
-pub trait Metadata: Default + private::Sealed {
+pub trait Metadata<T>: Default + private::Sealed {
+    /// The entry type used by this policy to wrap cached values.
+    type EntryType: EntryValue<T>;
+
     /// Returns the index of the entry that should be evicted next.
     ///
     /// This method provides the core eviction logic by identifying which
@@ -155,7 +157,10 @@ pub trait Metadata: Default + private::Sealed {
     /// - The cache is at capacity and a new entry needs to be inserted
     /// - The `pop()` method is called to explicitly remove the tail entry
     /// - The `tail()` method is called to inspect the next eviction candidate
-    fn candidate_removal_index(&self) -> usize;
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &IndexMap<K, Self::EntryType, RandomState>,
+    ) -> usize;
 }
 
 /// Trait defining cache eviction policies.
@@ -216,11 +221,8 @@ pub trait Metadata: Default + private::Sealed {
 /// arbitrary e.g. [`Random`]).
 #[doc(hidden)]
 pub trait Policy<T>: private::Sealed {
-    /// The entry type used by this policy to wrap cached values.
-    type EntryType: EntryValue<T>;
-
     /// The metadata type used by this policy to track eviction state.
-    type MetadataType: Metadata;
+    type MetadataType: Metadata<T>;
 
     /// The iterator type returned by `into_iter()`.
     type IntoIter<K>: Iterator<Item = (K, T)>;
@@ -241,15 +243,19 @@ pub trait Policy<T>: private::Sealed {
         index: usize,
         make_room: bool,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
+        queue: &mut IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> usize;
 
     /// Evict the next entry from the cache. Returns the actual evicted index.
+    #[allow(clippy::type_complexity)]
     fn evict_entry<K>(
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> (usize, Option<(K, Self::EntryType)>) {
-        let removed = metadata.candidate_removal_index();
+        queue: &mut IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+    ) -> (
+        usize,
+        Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
+    ) {
+        let removed = metadata.candidate_removal_index(queue);
         (removed, Self::swap_remove_entry(removed, metadata, queue))
     }
 
@@ -275,8 +281,8 @@ pub trait Policy<T>: private::Sealed {
     fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, Self::EntryType, RandomState>,
-    ) -> Option<(K, Self::EntryType)>;
+        queue: &mut IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+    ) -> Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>;
 
     /// Returns an iterator over the entries in the cache in eviction order.
     ///
@@ -303,7 +309,7 @@ pub trait Policy<T>: private::Sealed {
     /// An iterator yielding `(&Key, &Value)` pairs in eviction order
     fn iter<'q, K>(
         metadata: &'q Self::MetadataType,
-        queue: &'q IndexMap<K, Self::EntryType, RandomState>,
+        queue: &'q IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q;
@@ -337,7 +343,7 @@ pub trait Policy<T>: private::Sealed {
     /// this a consuming operation.
     fn into_iter<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, Self::EntryType, RandomState>,
+        queue: IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Self::IntoIter<K>;
 
     /// Converts the cache entries into an iterator of key-entry pairs in
@@ -357,9 +363,9 @@ pub trait Policy<T>: private::Sealed {
     ///
     /// # Returns
     ///
-    /// An iterator that yields `(K, Self::EntryType)` pairs in the
-    /// policy-specific eviction order. The iterator consumes the cache
-    /// contents.
+    /// An iterator that yields `(K, <Self::MetadataType as
+    /// Metadata<T>>::EntryType)` pairs in the policy-specific eviction
+    /// order. The iterator consumes the cache contents.
     ///
     /// # Use Cases
     ///
@@ -369,8 +375,8 @@ pub trait Policy<T>: private::Sealed {
     /// For typical usage, prefer `into_iter()` which extracts just the values.
     fn into_entries<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, Self::EntryType, RandomState>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)>;
+        queue: IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+    ) -> impl Iterator<Item = (K, <Self::MetadataType as Metadata<T>>::EntryType)>;
 
     /// Validates the cache's internal state against the full set of kv pairs
     /// known. This is **expensive** and should only be used for debugging
@@ -379,7 +385,7 @@ pub trait Policy<T>: private::Sealed {
     #[doc(hidden)]
     fn debug_validate<K: Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &IndexMap<K, Self::EntryType, RandomState>,
+        queue: &IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) where
         T: std::fmt::Debug;
 }
@@ -797,11 +803,42 @@ pub type SIEVE<Key, Value> = Sieve<Key, Value>;
 ///
 /// - Pre-allocates space for `capacity` entries to minimize reallocations
 /// - Automatically evicts entries when capacity is exceeded
-#[derive(Debug, Clone)]
 pub struct Cache<Key, Value, PolicyType: Policy<Value>> {
-    queue: IndexMap<Key, PolicyType::EntryType, RandomState>,
+    queue: IndexMap<Key, <PolicyType::MetadataType as Metadata<Value>>::EntryType, RandomState>,
     capacity: NonZeroUsize,
     metadata: PolicyType::MetadataType,
+}
+
+impl<Key, Value, PolicyType: Policy<Value>> std::fmt::Debug for Cache<Key, Value, PolicyType>
+where
+    Key: std::fmt::Debug,
+    Value: std::fmt::Debug,
+    PolicyType::MetadataType: std::fmt::Debug,
+    <PolicyType::MetadataType as Metadata<Value>>::EntryType: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache")
+            .field("queue", &self.queue)
+            .field("capacity", &self.capacity)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
+impl<Key, Value, PolicyType: Policy<Value>> Clone for Cache<Key, Value, PolicyType>
+where
+    Key: Clone + Hash + Eq,
+    Value: Clone,
+    PolicyType::MetadataType: Clone,
+    <PolicyType::MetadataType as Metadata<Value>>::EntryType: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            queue: self.queue.clone(),
+            capacity: self.capacity,
+            metadata: self.metadata.clone(),
+        }
+    }
 }
 
 impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyType> {
@@ -1008,10 +1045,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - Fifo: Returns the first inserted entry
     /// - Lifo: Returns the last inserted entry
     /// - Random: Returns a randomly selected entry
-    /// - Sieve: Returns the entry at the hand position, which is the current
-    ///   eviction candidate. If this entry has been accessed (visited=true), it
-    ///   will get a second chance and the hand will advance to find the next
-    ///   unvisited entry for actual eviction.
+    /// - Sieve: Returns the next entry that would be evicted after any second
+    ///   chances. This may involve an O(n) scan across the cache to find the
+    ///   next unvisited entry. **This does not update the visited bit, so an
+    ///   eviction will need to rescan even if this method is called**.
     ///
     /// # Returns
     ///
@@ -1038,7 +1075,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn tail(&self) -> Option<(&Key, &Value)> {
         self.queue
-            .get_index(self.metadata.candidate_removal_index())
+            .get_index(self.metadata.candidate_removal_index(&self.queue))
             .map(|(key, entry)| (key, entry.value()))
     }
 
@@ -1163,7 +1200,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
             }
             indexmap::map::Entry::Vacant(v) => {
                 let index = v.index();
-                let e = PolicyType::EntryType::new(or_insert(v.key()));
+                let e = <PolicyType::MetadataType as Metadata<Value>>::EntryType::new(or_insert(
+                    v.key(),
+                ));
                 v.insert(e);
                 let index = PolicyType::touch_entry(
                     index,
@@ -1271,7 +1310,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
             }
             indexmap::map::Entry::Vacant(v) => {
                 let index = v.index();
-                v.insert(PolicyType::EntryType::new(value));
+                v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
 
                 let index = PolicyType::touch_entry(
                     index,
@@ -1887,8 +1926,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
     where
         I: IntoIterator<Item = (Key, Value)>,
     {
-        let mut queue: IndexMap<Key, PolicyType::EntryType, RandomState> =
-            IndexMap::with_hasher(RandomState::default());
+        let mut queue: IndexMap<
+            Key,
+            <PolicyType::MetadataType as Metadata<Value>>::EntryType,
+            RandomState,
+        > = IndexMap::with_hasher(RandomState::default());
         let mut metadata = PolicyType::MetadataType::default();
 
         for (key, value) in iter {
@@ -1899,7 +1941,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
                 }
                 indexmap::map::Entry::Vacant(v) => {
                     let index = v.index();
-                    v.insert(PolicyType::EntryType::new(value));
+                    v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
                     PolicyType::touch_entry(index, false, &mut metadata, &mut queue);
                 }
             }

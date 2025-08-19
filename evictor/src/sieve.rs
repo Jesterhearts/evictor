@@ -1,7 +1,10 @@
+use indexmap::IndexMap;
+
 use crate::{
     EntryValue,
     Metadata,
     Policy,
+    RandomState,
     private,
     utils::swap_remove_ll_entry,
 };
@@ -21,9 +24,25 @@ pub struct SieveMetadata {
 
 impl private::Sealed for SieveMetadata {}
 
-impl Metadata for SieveMetadata {
-    fn candidate_removal_index(&self) -> usize {
-        self.hand
+impl<Value> Metadata<Value> for SieveMetadata {
+    type EntryType = SieveEntry<Value>;
+
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &IndexMap<K, SieveEntry<Value>, RandomState>,
+    ) -> usize {
+        if queue.is_empty() {
+            return 0;
+        }
+
+        let mut visited = vec![true; queue.len()];
+        let mut hand = self.hand;
+        while queue[hand].visited && visited[hand] {
+            visited[hand] = false;
+            hand = queue[hand].prev.unwrap_or(self.tail);
+        }
+
+        hand
     }
 }
 
@@ -71,7 +90,6 @@ impl<Value> EntryValue<Value> for SieveEntry<Value> {
 }
 
 impl<Value> Policy<Value> for SievePolicy {
-    type EntryType = SieveEntry<Value>;
     type IntoIter<K> = IntoIter<K, Value>;
     type MetadataType = SieveMetadata;
 
@@ -79,7 +97,7 @@ impl<Value> Policy<Value> for SievePolicy {
         mut index: usize,
         make_room: bool,
         metadata: &mut Self::MetadataType,
-        queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: &mut IndexMap<K, SieveEntry<Value>, RandomState>,
     ) -> usize {
         if index >= queue.len() {
             return index;
@@ -116,8 +134,8 @@ impl<Value> Policy<Value> for SievePolicy {
 
     fn evict_entry<K>(
         metadata: &mut Self::MetadataType,
-        queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-    ) -> (usize, Option<(K, Self::EntryType)>) {
+        queue: &mut IndexMap<K, SieveEntry<Value>, RandomState>,
+    ) -> (usize, Option<(K, SieveEntry<Value>)>) {
         if queue.is_empty() {
             return (0, None);
         }
@@ -139,8 +157,8 @@ impl<Value> Policy<Value> for SievePolicy {
     fn swap_remove_entry<K>(
         index: usize,
         metadata: &mut Self::MetadataType,
-        queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-    ) -> Option<(K, Self::EntryType)> {
+        queue: &mut IndexMap<K, SieveEntry<Value>, RandomState>,
+    ) -> Option<(K, SieveEntry<Value>)> {
         if index >= queue.len() {
             return None;
         }
@@ -169,7 +187,7 @@ impl<Value> Policy<Value> for SievePolicy {
 
     fn iter<'q, K>(
         metadata: &'q Self::MetadataType,
-        queue: &'q indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: &'q IndexMap<K, SieveEntry<Value>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q Value)>
     where
         Value: 'q,
@@ -199,7 +217,7 @@ impl<Value> Policy<Value> for SievePolicy {
 
     fn into_iter<K>(
         metadata: Self::MetadataType,
-        queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: IndexMap<K, SieveEntry<Value>, RandomState>,
     ) -> Self::IntoIter<K> {
         if queue.is_empty() {
             return IntoIter {
@@ -226,8 +244,8 @@ impl<Value> Policy<Value> for SievePolicy {
 
     fn into_entries<K>(
         metadata: Self::MetadataType,
-        queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-    ) -> impl Iterator<Item = (K, Self::EntryType)> {
+        queue: IndexMap<K, SieveEntry<Value>, RandomState>,
+    ) -> impl Iterator<Item = (K, SieveEntry<Value>)> {
         if queue.is_empty() {
             return IntoEntriesIter {
                 index: None,
@@ -254,7 +272,7 @@ impl<Value> Policy<Value> for SievePolicy {
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+        queue: &IndexMap<K, SieveEntry<Value>, RandomState>,
     ) where
         Value: std::fmt::Debug,
     {
@@ -267,7 +285,7 @@ impl<Value> Policy<Value> for SievePolicy {
 #[derive(Debug, Clone)]
 struct Iter<'q, K, T> {
     metadata: &'q SieveMetadata,
-    queue: &'q indexmap::IndexMap<K, SieveEntry<T>, crate::RandomState>,
+    queue: &'q IndexMap<K, SieveEntry<T>, RandomState>,
     visits: Vec<u8>,
     index: Option<usize>,
 }
@@ -837,6 +855,19 @@ mod tests {
         assert!(keys.contains(&'b'));
         assert!(keys.contains(&'c'));
         assert!(keys.contains(&'d'));
+    }
+
+    #[test]
+    fn iterator_next_is_tail_is_pop() {
+        let mut cache = Sieve::new(NonZeroUsize::new(3).unwrap());
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+
+        assert_eq!(cache.iter().next(), cache.tail());
+        let tail = cache.tail().map(|(k, v)| (*k, v.clone()));
+        let popped = cache.pop();
+        assert_eq!(tail, popped);
     }
 
     #[test]

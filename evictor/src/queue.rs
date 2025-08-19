@@ -58,14 +58,18 @@ macro_rules! impl_queue_policy {
 
         impl private::Sealed for $metadata_name {}
 
-        impl Metadata for $metadata_name {
-            fn candidate_removal_index(&self) -> usize {
+        impl<T> Metadata<T> for $metadata_name {
+            type EntryType = $entry_name<T>;
+
+            fn candidate_removal_index<K>(
+                &self,
+                _: &indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+            ) -> usize {
                 self.head
             }
         }
 
         impl<T> Policy<T> for $policy_name {
-            type EntryType = $entry_name<T>;
             type IntoIter<K> = IntoIter<K, T>;
             type MetadataType = $metadata_name;
 
@@ -73,13 +77,13 @@ macro_rules! impl_queue_policy {
                 mut index: usize,
                 make_room: bool,
                 metadata: &mut Self::MetadataType,
-                queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+                queue: &mut indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
             ) -> usize {
                 if index >= queue.len() {
                     return index;
                 }
 
-                let removal_index = metadata.candidate_removal_index();
+                let removal_index = metadata.candidate_removal_index(queue);
                 #[cfg(debug_assertions)]
                 if make_room {
                     assert_ne!(removal_index, index);
@@ -104,14 +108,14 @@ macro_rules! impl_queue_policy {
             fn swap_remove_entry<K>(
                 index: usize,
                 metadata: &mut Self::MetadataType,
-                queue: &mut indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-            ) -> Option<(K, Self::EntryType)> {
+                queue: &mut indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+            ) -> Option<(K, $entry_name<T>)> {
                 swap_remove_ll_entry!(index, metadata, queue)
             }
 
             fn iter<'q, K>(
                 metadata: &'q Self::MetadataType,
-                queue: &'q indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+                queue: &'q indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
             ) -> impl Iterator<Item = (&'q K, &'q T)>
             where
                 T: 'q,
@@ -124,7 +128,7 @@ macro_rules! impl_queue_policy {
 
             fn into_iter<K>(
                 metadata: Self::MetadataType,
-                queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+                queue: indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
             ) -> Self::IntoIter<K> {
                 IntoIter {
                     queue: queue.into_iter().map(Some).collect(),
@@ -134,8 +138,8 @@ macro_rules! impl_queue_policy {
 
             fn into_entries<K>(
                 metadata: Self::MetadataType,
-                queue: indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
-            ) -> impl Iterator<Item = (K, Self::EntryType)> {
+                queue: indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+            ) -> impl Iterator<Item = (K, $entry_name<T>)> {
                 IntoEntriesIter {
                     queue: queue.into_iter().map(Some).collect(),
                     index: Some(metadata.head),
@@ -145,7 +149,7 @@ macro_rules! impl_queue_policy {
             #[cfg(all(debug_assertions, feature = "internal-debugging"))]
             fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
                 metadata: &Self::MetadataType,
-                queue: &indexmap::IndexMap<K, Self::EntryType, crate::RandomState>,
+                queue: &indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
             ) where
                 T: std::fmt::Debug,
             {
