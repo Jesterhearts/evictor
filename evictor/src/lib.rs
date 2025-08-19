@@ -650,9 +650,7 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// A Sieve cache implementing the algorithm outlined in the paper
 /// [Sieve is Simpler than Lru](https://junchengyang.com/publication/nsdi24-SIEVE.pdf).
 ///
-/// Sieve is a simple and efficient eviction policy that provides performance
-/// comparable to Lru while being significantly easier to implement and
-/// maintain. It uses a "visited" bit per entry and a hand pointer that scans
+/// Sieve uses a "visited" bit per entry and a hand pointer that scans
 /// for eviction candidates, giving recently accessed items a "second chance"
 /// before eviction.
 ///
@@ -1905,13 +1903,13 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///   order
     ///
     /// ## Sieve
-    /// Iterates in **eviction order assuming no modifications**:
+    /// Iterates in **eviction order**:
     /// - Starts from the current hand position (next eviction candidate)
     /// - Simulates the eviction scanning process: skips visited entries once,
     ///   then includes them in order
-    /// - Uses additional state tracking and map lookups to maintain this
-    ///   logical ordering
-    /// - **Higher overhead** than other policies due to eviction simulation
+    /// - Uses additional state tracking to maintain this logical ordering
+    /// - **Higher iteration overhead** than other policies due to eviction
+    ///   simulation
     ///
     /// # Time Complexity
     /// - Creating the iterator: **O(1)**
