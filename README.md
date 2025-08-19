@@ -110,7 +110,6 @@ patterns.
 ### Safety & Guarantees
 
 * No unsafe code in public API surface (only library dependencies may use it).
-* Iterators borrow immutably; mutation APIs preserve internal consistency in O(1).
 
 ### License
 
