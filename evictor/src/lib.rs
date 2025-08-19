@@ -1448,10 +1448,26 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(cache.get(&1).unwrap(), &vec![4, 5, 6]);
     /// ```
     pub fn try_insert_mut(&mut self, key: Key, value: Value) -> Result<&mut Value, (Key, Value)> {
-        if self.queue.len() >= self.capacity.get() {
-            return Err((key, value));
+        let len = self.queue.len();
+        match self.queue.entry(key) {
+            indexmap::map::Entry::Occupied(mut o) => {
+                *o.get_mut().value_mut() = value;
+                let index =
+                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+                Ok(self.queue[index].value_mut())
+            }
+            indexmap::map::Entry::Vacant(v) => {
+                if len >= self.capacity.get() {
+                    return Err((v.into_key(), value));
+                }
+
+                let index = v.index();
+                v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
+                let index =
+                    PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
+                Ok(self.queue[index].value_mut())
+            }
         }
-        Ok(self.insert_mut(key, value))
     }
 
     /// The immutable version of `try_get_or_insert_with_mut`. See
