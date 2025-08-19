@@ -792,6 +792,320 @@ pub type Sieve<Key, Value> = Cache<Key, Value, SievePolicy>;
 #[doc(hidden)]
 pub type SIEVE<Key, Value> = Sieve<Key, Value>;
 
+/// Cache performance and usage statistics.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "statistics")] {
+/// use evictor::Lru;
+///
+/// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+/// cache.insert("a".to_string(), 1);
+/// cache.insert("b".to_string(), 2);
+///
+/// let stats = cache.statistics();
+/// assert_eq!(stats.len(), 2);
+/// assert_eq!(stats.insertions(), 2);
+/// assert_eq!(stats.evictions(), 0);
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+#[cfg(feature = "statistics")]
+pub struct Statistics {
+    len: usize,
+    capacity: NonZeroUsize,
+    evictions: u64,
+    insertions: u64,
+    misses: u64,
+    hits: u64,
+}
+
+#[cfg(feature = "statistics")]
+impl Statistics {
+    fn with_capacity(capacity: NonZeroUsize) -> Self {
+        Self {
+            len: 0,
+            capacity,
+            evictions: 0,
+            insertions: 0,
+            misses: 0,
+            hits: 0,
+        }
+    }
+
+    /// Returns `true` if the cache contains no entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// assert!(cache.statistics().is_empty());
+    ///
+    /// cache.insert("key".to_string(), "value".to_string());
+    /// assert!(!cache.statistics().is_empty());
+    /// # }
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the current number of entries stored in the cache.
+    ///
+    /// This count represents the actual number of key-value pairs currently
+    /// residing in the cache, which may be less than the cache's capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(3).unwrap());
+    /// assert_eq!(cache.statistics().len(), 0);
+    ///
+    /// cache.insert("a".to_string(), 1);
+    /// cache.insert("b".to_string(), 2);
+    /// assert_eq!(cache.statistics().len(), 2);
+    /// # }
+    /// ```
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the current cache residency as a percentage (0.0 to 100.0).
+    ///
+    /// Residency represents how full the cache is, calculated as the current
+    /// number of entries divided by the maximum capacity, expressed as a
+    /// percentage. A residency of 100.0% indicates the cache is at full
+    /// capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(4).unwrap());
+    /// assert_eq!(cache.statistics().residency(), 0.0);
+    ///
+    /// cache.insert("a".to_string(), 1);
+    /// cache.insert("b".to_string(), 2);
+    /// assert_eq!(cache.statistics().residency(), 50.0);
+    ///
+    /// cache.insert("c".to_string(), 3);
+    /// cache.insert("d".to_string(), 4);
+    /// assert_eq!(cache.statistics().residency(), 100.0);
+    /// # }
+    /// ```
+    pub fn residency(&self) -> f64 {
+        self.len as f64 / self.capacity.get() as f64 * 100.0
+    }
+
+    /// Returns the maximum capacity of the cache.
+    ///
+    /// This is the maximum number of key-value pairs that the cache can store
+    /// before eviction policies take effect to make room for new entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let cache: Lru<String, i32> = Lru::new(std::num::NonZeroUsize::new(100).unwrap());
+    /// assert_eq!(cache.statistics().capacity(), 100);
+    /// # }
+    /// ```
+    pub fn capacity(&self) -> usize {
+        self.capacity.get()
+    }
+
+    /// Returns the total number of evictions that have occurred.
+    ///
+    /// An eviction happens when an entry is removed from the cache to make room
+    /// for a new entry, according to the cache's eviction policy (LRU, LFU,
+    /// etc.). This counter tracks the lifetime total of such removals.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// assert_eq!(cache.statistics().evictions(), 0);
+    ///
+    /// cache.insert("a".to_string(), 1);
+    /// cache.insert("b".to_string(), 2);
+    /// assert_eq!(cache.statistics().evictions(), 0);
+    ///
+    /// // This insertion will evict the least recently used entry
+    /// cache.insert("c".to_string(), 3);
+    /// assert_eq!(cache.statistics().evictions(), 1);
+    /// # }
+    /// ```
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
+    /// Returns the total number of insertion operations that have occurred.
+    ///
+    /// This counter increments every time a new key-value pair is inserted into
+    /// the cache, regardless of whether it causes an eviction. Updates to
+    /// existing keys also count as insertions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// assert_eq!(cache.statistics().insertions(), 0);
+    ///
+    /// cache.insert("a".to_string(), 1);
+    /// assert_eq!(cache.statistics().insertions(), 1);
+    ///
+    /// cache.insert("a".to_string(), 2); // Update existing key
+    /// assert_eq!(cache.statistics().insertions(), 1);
+    /// # }
+    /// ```
+    pub fn insertions(&self) -> u64 {
+        self.insertions
+    }
+
+    /// Returns the total number of cache hits.
+    ///
+    /// A cache hit occurs when a requested key is found in the cache.
+    /// This metric is useful for measuring cache effectiveness.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// cache.insert("a".to_string(), 1);
+    ///
+    /// assert_eq!(cache.statistics().hits(), 0);
+    ///
+    /// cache.get(&"a".to_string()); // Hit
+    /// assert_eq!(cache.statistics().hits(), 1);
+    ///
+    /// cache.get(&"b".to_string()); // Miss
+    /// assert_eq!(cache.statistics().hits(), 1);
+    /// # }
+    /// ```
+    pub fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    /// Returns the total number of cache misses.
+    ///
+    /// A cache miss occurs when a requested key is not found in the cache.
+    /// High miss rates may indicate the cache size is too small or the access
+    /// pattern is not well-suited for caching.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// cache.insert("a".to_string(), 1);
+    ///
+    /// assert_eq!(cache.statistics().misses(), 0);
+    ///
+    /// cache.get(&"a".to_string()); // Hit
+    /// assert_eq!(cache.statistics().misses(), 0);
+    ///
+    /// cache.get(&"b".to_string()); // Miss
+    /// assert_eq!(cache.statistics().misses(), 1);
+    /// # }
+    /// ```
+    pub fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    /// Returns the cache hit rate as a percentage (0.0 to 100.0).
+    ///
+    /// The hit rate is calculated as `hits / (hits + misses) * 100`.
+    /// A higher hit rate indicates better cache performance. Returns 0.0
+    /// if no cache access operations have been performed yet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// cache.insert("a".to_string(), 1);
+    /// cache.insert("b".to_string(), 2);
+    ///
+    /// // Initially no accesses, so hit rate is 0
+    /// assert_eq!(cache.statistics().hit_rate(), 0.0);
+    ///
+    /// cache.get(&"a".to_string()); // Hit
+    /// cache.get(&"b".to_string()); // Hit
+    /// cache.get(&"c".to_string()); // Miss
+    ///
+    /// // 2 hits out of 3 total accesses = 66.67%
+    /// assert!((cache.statistics().hit_rate() - 66.66666666666666).abs() < f64::EPSILON);
+    /// # }
+    /// ```
+    pub fn hit_rate(&self) -> f64 {
+        if self.hits + self.misses == 0 {
+            0.0
+        } else {
+            self.hits as f64 / (self.hits + self.misses) as f64 * 100.0
+        }
+    }
+
+    /// Returns the cache miss rate as a percentage (0.0 to 100.0).
+    ///
+    /// The miss rate is calculated as `misses / (hits + misses) * 100`.
+    /// A lower miss rate indicates better cache performance. Returns 0.0
+    /// if no cache access operations have been performed yet.
+    ///
+    /// Note: `hit_rate() + miss_rate()` always equals 100.0 (when there have
+    /// been accesses).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "statistics")] {
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::new(std::num::NonZeroUsize::new(2).unwrap());
+    /// cache.insert("a".to_string(), 1);
+    ///
+    /// // Initially no accesses, so miss rate is 0
+    /// assert_eq!(cache.statistics().miss_rate(), 0.0);
+    ///
+    /// cache.get(&"a".to_string()); // Hit
+    /// cache.get(&"b".to_string()); // Miss
+    /// cache.get(&"c".to_string()); // Miss
+    ///
+    /// // 2 misses out of 3 total accesses = 66.67%
+    /// assert!((cache.statistics().miss_rate() - 66.66666666666666).abs() < f64::EPSILON);
+    /// # }
+    /// ```
+    pub fn miss_rate(&self) -> f64 {
+        if self.hits + self.misses == 0 {
+            0.0
+        } else {
+            self.misses as f64 / (self.hits + self.misses) as f64 * 100.0
+        }
+    }
+}
+
 /// A generic cache implementation with configurable eviction policies.
 ///
 /// `Cache` is the underlying generic structure that powers Lru, Mru, Lfu,
@@ -818,6 +1132,9 @@ pub struct Cache<Key, Value, PolicyType: Policy<Value>> {
     queue: IndexMap<Key, <PolicyType::MetadataType as Metadata<Value>>::EntryType, RandomState>,
     capacity: NonZeroUsize,
     metadata: PolicyType::MetadataType,
+
+    #[cfg(feature = "statistics")]
+    statistics: Statistics,
 }
 
 impl<Key, Value, PolicyType: Policy<Value>> std::fmt::Debug for Cache<Key, Value, PolicyType>
@@ -848,6 +1165,8 @@ where
             queue: self.queue.clone(),
             capacity: self.capacity,
             metadata: self.metadata.clone(),
+            #[cfg(feature = "statistics")]
+            statistics: self.statistics.clone(),
         }
     }
 }
@@ -880,7 +1199,25 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
             queue: IndexMap::with_capacity_and_hasher(capacity.get(), RandomState::default()),
             capacity,
             metadata: PolicyType::MetadataType::default(),
+            #[cfg(feature = "statistics")]
+            statistics: Statistics::with_capacity(capacity),
         }
+    }
+
+    /// Returns the current statistics for the cache.
+    #[cfg(feature = "statistics")]
+    pub fn statistics(&self) -> Statistics {
+        Statistics {
+            len: self.queue.len(),
+            capacity: self.capacity,
+            ..self.statistics
+        }
+    }
+
+    /// Resets the cache statistics to their initial state.
+    #[cfg(feature = "statistics")]
+    pub fn reset_statistics(&mut self) {
+        self.statistics = Statistics::with_capacity(self.capacity);
     }
 
     /// Removes all entries from the cache.
@@ -1207,6 +1544,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
             indexmap::map::Entry::Occupied(o) => {
                 let index =
                     PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
                 self.queue[index].value_mut()
             }
             indexmap::map::Entry::Vacant(v) => {
@@ -1215,6 +1558,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                     v.key(),
                 ));
                 v.insert(e);
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.insertions += 1;
+                    self.statistics.misses += 1;
+
+                    self.statistics.evictions += u64::from(len == self.capacity.get());
+                }
+
                 let index = PolicyType::touch_entry(
                     index,
                     len == self.capacity.get(),
@@ -1362,6 +1713,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                 *o.get_mut().value_mut() = value;
                 let index =
                     PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
                 self.queue[index].value_mut()
             }
             indexmap::map::Entry::Vacant(v) => {
@@ -1375,15 +1732,21 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                     &mut self.queue,
                 );
 
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.insertions += 1;
+                    self.statistics.evictions += u64::from(len == self.capacity.get());
+                }
+
                 self.queue[index].value_mut()
             }
         }
     }
 
-    /// The immutable version of `try_insert_mut`. See [`Self::try_insert_mut`]
-    /// for details.
-    pub fn try_insert(&mut self, key: Key, value: Value) -> Result<&Value, (Key, Value)> {
-        self.try_insert_mut(key, value).map(|v| &*v)
+    /// The immutable version of `try_insert_or_update_mut`. See
+    /// [`Self::try_insert_or_update_mut`] for details.
+    pub fn try_insert_or_update(&mut self, key: Key, value: Value) -> Result<&Value, (Key, Value)> {
+        self.try_insert_or_update_mut(key, value).map(|v| &*v)
     }
 
     /// Attempts to insert a key-value pair into the cache without triggering
@@ -1415,15 +1778,19 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
     ///
     /// // Successful insertion with immediate mutation
-    /// let vec_ref = cache.try_insert_mut(1, vec!["hello".to_string()]).unwrap();
+    /// let vec_ref = cache
+    ///     .try_insert_or_update_mut(1, vec!["hello".to_string()])
+    ///     .unwrap();
     /// vec_ref.push("world".to_string());
     /// assert_eq!(cache.get(&1).unwrap().len(), 2);
     ///
     /// // Fill remaining capacity
-    /// cache.try_insert_mut(2, vec!["foo".to_string()]).unwrap();
+    /// cache
+    ///     .try_insert_or_update_mut(2, vec!["foo".to_string()])
+    ///     .unwrap();
     ///
     /// // Failed insertion when cache is at capacity
-    /// let result = cache.try_insert_mut(3, vec!["bar".to_string()]);
+    /// let result = cache.try_insert_or_update_mut(3, vec!["bar".to_string()]);
     /// assert!(result.is_err());
     /// if let Err((key, value)) = result {
     ///     assert_eq!(key, 3);
@@ -1443,22 +1810,42 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// cache.insert(1, vec![1, 2, 3]);
     ///
     /// // Updating an existing key always succeeds and allows mutation
-    /// let vec_ref = cache.try_insert_mut(1, vec![4, 5]).unwrap();
+    /// let vec_ref = cache.try_insert_or_update_mut(1, vec![4, 5]).unwrap();
     /// vec_ref.push(6);
     /// assert_eq!(cache.get(&1).unwrap(), &vec![4, 5, 6]);
     /// ```
-    pub fn try_insert_mut(&mut self, key: Key, value: Value) -> Result<&mut Value, (Key, Value)> {
+    pub fn try_insert_or_update_mut(
+        &mut self,
+        key: Key,
+        value: Value,
+    ) -> Result<&mut Value, (Key, Value)> {
         let len = self.queue.len();
         match self.queue.entry(key) {
             indexmap::map::Entry::Occupied(mut o) => {
                 *o.get_mut().value_mut() = value;
                 let index =
                     PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
                 Ok(self.queue[index].value_mut())
             }
             indexmap::map::Entry::Vacant(v) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.misses += 1;
+                }
+
                 if len >= self.capacity.get() {
                     return Err((v.into_key(), value));
+                }
+
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.insertions += 1;
                 }
 
                 let index = v.index();
@@ -1578,11 +1965,27 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
             indexmap::map::Entry::Occupied(o) => {
                 let index =
                     PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
                 Ok(self.queue[index].value_mut())
             }
             indexmap::map::Entry::Vacant(v) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.misses += 1;
+                }
+
                 if len >= self.capacity.get() {
                     return Err(v.into_key());
+                }
+
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.insertions += 1;
                 }
 
                 let index = v.index();
@@ -1646,8 +2049,18 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
         if let Some(index) = self.queue.get_index_of(key) {
             let index = PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
+
+            #[cfg(feature = "statistics")]
+            {
+                self.statistics.hits += 1;
+            }
+
             Some(self.queue[index].value_mut())
         } else {
+            #[cfg(feature = "statistics")]
+            {
+                self.statistics.misses += 1;
+            }
             None
         }
     }
@@ -1691,7 +2104,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     pub fn pop(&mut self) -> Option<(Key, Value)> {
         PolicyType::evict_entry(&mut self.metadata, &mut self.queue)
             .1
-            .map(|(key, entry)| (key, entry.into_value()))
+            .map(|(key, entry)| {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.evictions += 1;
+                }
+
+                (key, entry.into_value())
+            })
     }
 
     /// Removes a specific entry from the cache.
@@ -1842,6 +2262,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                 evicted.push(kv);
             }
         }
+
         self.capacity = capacity;
         evicted
     }
@@ -2392,22 +2813,49 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
         > = IndexMap::with_hasher(RandomState::default());
         let mut metadata = PolicyType::MetadataType::default();
 
+        #[cfg(feature = "statistics")]
+        let mut hits = 0;
+        #[cfg(feature = "statistics")]
+        let mut insertions = 0;
+        #[cfg(feature = "statistics")]
+        let mut misses = 0;
+
         for (key, value) in iter {
             match queue.entry(key) {
                 indexmap::map::Entry::Occupied(mut o) => {
                     *o.get_mut().value_mut() = value;
                     PolicyType::touch_entry(o.index(), false, &mut metadata, &mut queue);
+
+                    #[cfg(feature = "statistics")]
+                    {
+                        hits += 1;
+                    }
                 }
                 indexmap::map::Entry::Vacant(v) => {
                     let index = v.index();
                     v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
                     PolicyType::touch_entry(index, false, &mut metadata, &mut queue);
+
+                    #[cfg(feature = "statistics")]
+                    {
+                        insertions += 1;
+                        misses += 1;
+                    }
                 }
             }
         }
 
         let capacity = NonZeroUsize::new(queue.len().max(1)).unwrap();
         Self {
+            #[cfg(feature = "statistics")]
+            statistics: Statistics {
+                hits,
+                insertions,
+                evictions: 0,
+                len: queue.len(),
+                capacity,
+                misses,
+            },
             queue,
             capacity,
             metadata,
@@ -2714,5 +3162,275 @@ mod tests {
         assert!(debug_str.contains("Cache"));
         assert!(debug_str.contains("\"one\""));
         assert!(debug_str.contains("\"two\""));
+    }
+}
+
+#[cfg(all(test, feature = "statistics"))]
+mod statistics_tests {
+    use super::*;
+
+    #[test]
+    fn test_statistics_initialization() {
+        let cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+        let stats = cache.statistics();
+
+        assert_eq!(stats.len, 0);
+        assert_eq!(stats.capacity.get(), 3);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.insertions, 0);
+        assert_eq!(stats.evictions, 0);
+    }
+
+    #[test]
+    fn test_statistics_insertions_and_misses() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+
+        let stats = cache.statistics();
+        assert_eq!(stats.len, 3);
+        assert_eq!(stats.insertions, 3);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.evictions, 0);
+    }
+
+    #[test]
+    fn test_statistics_hits() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        // Test hits with get
+        cache.get(&1);
+        cache.get(&2);
+        cache.get(&1);
+
+        let stats = cache.statistics();
+        assert_eq!(stats.hits, 3);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.insertions, 2);
+    }
+
+    #[test]
+    fn test_statistics_misses_on_failed_get() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+
+        // Miss on non-existent key
+        cache.get(&999);
+        cache.get(&888);
+
+        let stats = cache.statistics();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.insertions, 1);
+    }
+
+    #[test]
+    fn test_statistics_evictions() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(2).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+
+        let stats_before = cache.statistics();
+        assert_eq!(stats_before.evictions, 0);
+
+        // This should trigger an eviction
+        cache.insert(3, "three".to_string());
+
+        let stats_after = cache.statistics();
+        assert_eq!(stats_after.evictions, 1);
+        assert_eq!(stats_after.len, 2);
+        assert_eq!(stats_after.insertions, 3);
+    }
+
+    #[test]
+    fn test_statistics_with_get_or_insert_with() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        // Insert through get_or_insert_with
+        cache.get_or_insert_with(1, |_| "one".to_string());
+        cache.get_or_insert_with(2, |_| "two".to_string());
+
+        let stats = cache.statistics();
+        assert_eq!(stats.insertions, 2);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.hits, 0);
+
+        // Hit through get_or_insert_with
+        cache.get_or_insert_with(1, |_| "one_new".to_string());
+
+        let stats = cache.statistics();
+        assert_eq!(stats.insertions, 2);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.hits, 1);
+    }
+
+    #[test]
+    fn test_statistics_with_try_insert() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(2).unwrap());
+
+        // Successful insertions
+        assert!(cache.try_insert_or_update(1, "one".to_string()).is_ok());
+        assert!(cache.try_insert_or_update(2, "two".to_string()).is_ok());
+
+        let stats = cache.statistics();
+        assert_eq!(stats.insertions, 2);
+        assert_eq!(stats.misses, 2);
+
+        // Failed insertion (key already exists)
+        assert_eq!(
+            cache.try_insert_or_update(1, "one_new".to_string()),
+            Ok(&"one_new".to_string())
+        );
+
+        let stats = cache.statistics();
+        assert_eq!(stats.insertions, 2); // Should not increment
+        assert_eq!(stats.hits, 1); // Should increment for the failed try_insert
+    }
+
+    #[test]
+    fn test_statistics_reset() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.get(&1);
+        cache.get(&999); // miss
+
+        let stats_before = cache.statistics();
+        assert!(stats_before.hits > 0);
+        assert!(stats_before.misses > 0);
+        assert!(stats_before.insertions > 0);
+
+        cache.reset_statistics();
+
+        let stats_after = cache.statistics();
+        assert_eq!(stats_after.hits, 0);
+        assert_eq!(stats_after.misses, 0);
+        assert_eq!(stats_after.insertions, 0);
+        assert_eq!(stats_after.evictions, 0);
+        assert_eq!(stats_after.len, 2); // len should match current cache state
+        assert_eq!(stats_after.capacity.get(), 3);
+    }
+
+    #[test]
+    fn test_statistics_with_remove() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+
+        let stats_before = cache.statistics();
+        assert_eq!(stats_before.len, 3);
+
+        cache.remove(&2);
+
+        let stats_after = cache.statistics();
+        assert_eq!(stats_after.len, 2);
+        // Remove shouldn't affect other statistics
+        assert_eq!(stats_after.insertions, stats_before.insertions);
+        assert_eq!(stats_after.hits, stats_before.hits);
+        assert_eq!(stats_after.misses, stats_before.misses);
+    }
+
+    #[test]
+    fn test_statistics_with_clear() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.get(&1);
+
+        let stats_before = cache.statistics();
+        assert!(stats_before.len > 0);
+
+        cache.clear();
+
+        let stats_after = cache.statistics();
+        assert_eq!(stats_after.len, 0);
+        // Clear shouldn't affect historical statistics
+        assert_eq!(stats_after.insertions, stats_before.insertions);
+        assert_eq!(stats_after.hits, stats_before.hits);
+        assert_eq!(stats_after.misses, stats_before.misses);
+    }
+
+    #[test]
+    fn test_statistics_with_set_capacity() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.insert(3, "three".to_string());
+
+        let stats_before = cache.statistics();
+        assert_eq!(stats_before.capacity.get(), 3);
+        assert_eq!(stats_before.evictions, 0);
+
+        // Set capacity to smaller size should trigger evictions
+        let evicted = cache.set_capacity(NonZeroUsize::new(1).unwrap());
+        assert_eq!(evicted.len(), 2); // Should evict 2 items
+
+        let stats_after = cache.statistics();
+        assert_eq!(stats_after.capacity.get(), 1);
+        assert_eq!(stats_after.len, 1);
+        assert_eq!(stats_after.evictions, 2); // Should evict 2 items
+    }
+
+    #[test]
+    fn test_statistics_with_different_policies() {
+        // Test with LFU policy
+        let mut lfu_cache = Cache::<i32, String, LfuPolicy>::new(NonZeroUsize::new(2).unwrap());
+        lfu_cache.insert(1, "one".to_string());
+        lfu_cache.insert(2, "two".to_string());
+        lfu_cache.get(&1); // Increase frequency of key 1
+        lfu_cache.insert(3, "three".to_string()); // Should evict key 2 (least frequently used)
+
+        let lfu_stats = lfu_cache.statistics();
+        assert_eq!(lfu_stats.evictions, 1);
+        assert_eq!(lfu_stats.hits, 1);
+        assert_eq!(lfu_stats.insertions, 3);
+
+        // Test with MRU policy
+        let mut mru_cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(2).unwrap());
+        mru_cache.insert(1, "one".to_string());
+        mru_cache.insert(2, "two".to_string());
+        mru_cache.get(&1); // Make key 1 most recently used
+        mru_cache.insert(3, "three".to_string()); // Should evict key 1 (most recently used)
+
+        let mru_stats = mru_cache.statistics();
+        assert_eq!(mru_stats.evictions, 1);
+        assert_eq!(mru_stats.hits, 1);
+        assert_eq!(mru_stats.insertions, 3);
+    }
+
+    #[test]
+    fn test_statistics_clone() {
+        let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
+
+        cache.insert(1, "one".to_string());
+        cache.insert(2, "two".to_string());
+        cache.get(&1);
+        cache.get(&999); // miss
+
+        let cloned_cache = cache.clone();
+        let original_stats = cache.statistics();
+        let cloned_stats = cloned_cache.statistics();
+
+        // Statistics should be identical after clone
+        assert_eq!(original_stats.len, cloned_stats.len);
+        assert_eq!(original_stats.capacity, cloned_stats.capacity);
+        assert_eq!(original_stats.hits, cloned_stats.hits);
+        assert_eq!(original_stats.misses, cloned_stats.misses);
+        assert_eq!(original_stats.insertions, cloned_stats.insertions);
+        assert_eq!(original_stats.evictions, cloned_stats.evictions);
     }
 }

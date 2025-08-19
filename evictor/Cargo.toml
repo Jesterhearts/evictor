@@ -11,9 +11,10 @@ repository   = "https://github.com/jesterhearts/evictor"
 readme       = "../README.md"
 
 [features]
-default = [ "ahash", "rand" ]
-ahash   = [ "dep:ahash" ]
-rand    = [ "dep:rand" ]
+default    = [ "ahash", "rand" ]
+ahash      = [ "dep:ahash" ]
+rand       = [ "dep:rand" ]
+statistics = [  ]
 # Enables **expensive** cache validation checks. You don't want this in production.
 internal-debugging = [  ]
 # Enables the nightly `doc_auto_cfg` feature.

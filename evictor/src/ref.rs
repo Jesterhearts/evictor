@@ -131,6 +131,11 @@ impl<K, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
                 &mut self.cache.metadata,
                 &mut self.cache.queue,
             );
+
+            #[cfg(feature = "statistics")]
+            {
+                self.cache.statistics.hits += 1;
+            }
         }
     }
 }

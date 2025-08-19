@@ -104,6 +104,7 @@ patterns.
 | -------------------- | ------- | ------------------------------------------------------------ |
 | `ahash`              | Yes     | Faster hashing (`ahash::RandomState`)                        |
 | `rand`               | Yes     | Enables `Random` policy                                      |
+| `statistics`         | No      | Enables cache statistics tracking (hits, misses, etc.)       |
 | `internal-debugging` | No      | Potentially expensive invariant checking (debug builds only) |
 
 ### Safety & Guarantees
