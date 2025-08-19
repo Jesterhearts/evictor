@@ -427,9 +427,11 @@ pub trait Policy<T>: private::Sealed {
 ///     ]
 /// );
 /// ```
+#[doc(alias = "LRU")]
 pub type Lru<Key, Value> = Cache<Key, Value, LruPolicy>;
 
 /// See [`Lru`].
+#[doc(hidden)]
 pub type LRU<Key, Value> = Lru<Key, Value>;
 
 /// A most-recently-used (Mru) cache.
@@ -468,9 +470,11 @@ pub type LRU<Key, Value> = Lru<Key, Value>;
 ///     ]
 /// );
 /// ```
+#[doc(alias = "MRU")]
 pub type Mru<Key, Value> = Cache<Key, Value, MruPolicy>;
 
 /// See [`Mru`].
+#[doc(hidden)]
 pub type MRU<Key, Value> = Mru<Key, Value>;
 
 /// A least-frequently-used (Lfu) cache.
@@ -521,9 +525,11 @@ pub type MRU<Key, Value> = Mru<Key, Value>;
 ///     ]
 /// );
 /// ```
+#[doc(alias = "LFU")]
 pub type Lfu<Key, Value> = Cache<Key, Value, LfuPolicy>;
 
 /// See [`Lfu`].
+#[doc(hidden)]
 pub type LFU<Key, Value> = Lfu<Key, Value>;
 
 /// A first-in-first-out (Fifo) cache.
@@ -562,9 +568,11 @@ pub type LFU<Key, Value> = Lfu<Key, Value>;
 ///     ]
 /// );
 /// ```
+#[doc(alias = "FIFO")]
 pub type Fifo<Key, Value> = Cache<Key, Value, FifoPolicy>;
 
 /// See [`Fifo`].
+#[doc(hidden)]
 pub type FIFO<Key, Value> = Fifo<Key, Value>;
 
 /// A last-in-first-out (Lifo) cache.
@@ -603,9 +611,11 @@ pub type FIFO<Key, Value> = Fifo<Key, Value>;
 ///     ]
 /// );
 /// ```
+#[doc(alias = "LIFO")]
 pub type Lifo<Key, Value> = Cache<Key, Value, LifoPolicy>;
 
 /// See [`Lifo`].
+#[doc(hidden)]
 pub type LIFO<Key, Value> = Lifo<Key, Value>;
 
 /// A random eviction cache.
@@ -775,9 +785,11 @@ pub type Random<Key, Value> = Cache<Key, Value, RandomPolicy>;
 /// // First item should match tail() (next eviction candidate)
 /// assert_eq!(cache.tail().unwrap(), cache.iter().next().unwrap());
 /// ```
+#[doc(alias = "SIEVE")]
 pub type Sieve<Key, Value> = Cache<Key, Value, SievePolicy>;
 
 /// See [`Sieve`].
+#[doc(hidden)]
 pub type SIEVE<Key, Value> = Sieve<Key, Value>;
 
 /// A generic cache implementation with configurable eviction policies.
@@ -1293,42 +1305,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         self.get_or_insert_with_mut(key, |_| Value::default())
     }
 
-    /// Inserts a key-value pair into the cache.
-    ///
-    /// If the key already exists, its value is updated and the entry is marked
-    /// as touched. If the key is new and the cache is at capacity, the policy
-    /// determines which entry is evicted to make room.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to insert or update
-    /// * `value` - The value to associate with the key
-    ///
-    /// # Returns
-    ///
-    /// An immutable reference to the inserted value.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use std::num::NonZeroUsize;
-    ///
-    /// use evictor::Lru;
-    ///
-    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
-    ///
-    /// cache.insert(1, "one".to_string());
-    /// cache.insert(2, "two".to_string());
-    /// assert_eq!(cache.len(), 2);
-    ///
-    /// // This will evict the least recently used entry (key 1)
-    /// cache.insert(3, "three".to_string());
-    ///
-    /// assert_eq!(
-    ///     cache.into_iter().collect::<Vec<_>>(),
-    ///     [(2, "two".to_string()), (3, "three".to_string())]
-    /// );
-    /// ```
+    /// The immutable version of `insert_mut`. See [`Self::insert_mut`] for
+    /// details.
     pub fn insert(&mut self, key: Key, value: Value) -> &Value {
         self.insert_mut(key, value)
     }
@@ -1402,20 +1380,30 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         }
     }
 
-    /// Gets a value from the cache, marking it as touched.
+    /// The immutable version of `try_insert_mut`. See [`Self::try_insert_mut`]
+    /// for details.
+    pub fn try_insert(&mut self, key: Key, value: Value) -> Result<&Value, (Key, Value)> {
+        self.try_insert_mut(key, value).map(|v| &*v)
+    }
+
+    /// Attempts to insert a key-value pair into the cache without triggering
+    /// eviction, returning a mutable reference to the inserted value.
     ///
-    /// If the key exists, returns a reference to the value and updates the
-    /// entry's position in the eviction order according to the policy.
-    /// If the key doesn't exist, returns `None` and the cache is unchanged.
+    /// This method only inserts the entry if the cache has available capacity.
+    /// If the cache is at capacity, the insertion fails and the key-value pair
+    /// is returned unchanged. Unlike [`insert_mut`](Self::insert_mut), this
+    /// method will never evict existing entries.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to look up
+    /// * `key` - The key to insert
+    /// * `value` - The value to associate with the key
     ///
     /// # Returns
     ///
-    /// * `Some(&Value)` if the key exists
-    /// * `None` if the key doesn't exist
+    /// * `Ok(&mut Value)` - A mutable reference to the inserted value if
+    ///   successful
+    /// * `Err((Key, Value))` - The original key-value pair if insertion failed
     ///
     /// # Examples
     ///
@@ -1424,18 +1412,176 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// use evictor::Lru;
     ///
-    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
-    /// cache.insert(1, "one".to_string());
-    /// cache.insert(2, "two".to_string());
+    /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
     ///
-    /// // Get and mark as recently used
-    /// assert_eq!(cache.get(&1), Some(&"one".to_string()));
-    /// assert_eq!(cache.get(&3), None);
-    /// assert_eq!(
-    ///     cache.into_iter().collect::<Vec<_>>(),
-    ///     vec![(2, "two".to_string()), (1, "one".to_string())]
-    /// );
+    /// // Successful insertion with immediate mutation
+    /// let vec_ref = cache.try_insert_mut(1, vec!["hello".to_string()]).unwrap();
+    /// vec_ref.push("world".to_string());
+    /// assert_eq!(cache.get(&1).unwrap().len(), 2);
+    ///
+    /// // Fill remaining capacity
+    /// cache.try_insert_mut(2, vec!["foo".to_string()]).unwrap();
+    ///
+    /// // Failed insertion when cache is at capacity
+    /// let result = cache.try_insert_mut(3, vec!["bar".to_string()]);
+    /// assert!(result.is_err());
+    /// if let Err((key, value)) = result {
+    ///     assert_eq!(key, 3);
+    ///     assert_eq!(value, vec!["bar".to_string()]);
+    /// }
+    /// assert_eq!(cache.len(), 2); // Cache unchanged
     /// ```
+    ///
+    /// # Updating Existing Keys
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, Vec<i32>>::new(NonZeroUsize::new(1).unwrap());
+    /// cache.insert(1, vec![1, 2, 3]);
+    ///
+    /// // Updating an existing key always succeeds and allows mutation
+    /// let vec_ref = cache.try_insert_mut(1, vec![4, 5]).unwrap();
+    /// vec_ref.push(6);
+    /// assert_eq!(cache.get(&1).unwrap(), &vec![4, 5, 6]);
+    /// ```
+    pub fn try_insert_mut(&mut self, key: Key, value: Value) -> Result<&mut Value, (Key, Value)> {
+        if self.queue.len() >= self.capacity.get() {
+            return Err((key, value));
+        }
+        Ok(self.insert_mut(key, value))
+    }
+
+    /// The immutable version of `try_get_or_insert_with_mut`. See
+    /// [`Self::try_get_or_insert_with_mut`] for details.
+    pub fn try_get_or_insert_with(
+        &mut self,
+        key: Key,
+        or_insert: impl FnOnce(&Key) -> Value,
+    ) -> Result<&Value, Key> {
+        self.try_get_or_insert_with_mut(key, or_insert).map(|v| &*v)
+    }
+
+    /// Attempts to get a mutable value from the cache or insert it using a
+    /// closure, without triggering eviction of other entries.
+    ///
+    /// If the key exists, returns a mutable reference to the existing value and
+    /// marks it as touched. If the key doesn't exist and the cache has
+    /// available capacity, the closure is called to generate a value which
+    /// is then inserted. If the cache is at capacity and the key doesn't
+    /// exist, the operation fails and returns the key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up or insert
+    /// * `or_insert` - A closure that generates the value if the key is not
+    ///   found
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&mut Value)` - A mutable reference to the value if successful
+    /// * `Err(Key)` - The original key if insertion failed due to capacity
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
+    ///
+    /// // Insert new value and modify it immediately
+    /// let vec_ref = cache
+    ///     .try_get_or_insert_with_mut(1, |_| vec!["initial".to_string()])
+    ///     .unwrap();
+    /// vec_ref.push("added".to_string());
+    /// assert_eq!(cache.get(&1).unwrap().len(), 2);
+    ///
+    /// // Get existing value and modify it further
+    /// let vec_ref = cache
+    ///     .try_get_or_insert_with_mut(1, |_| vec!["not-called".to_string()])
+    ///     .unwrap();
+    /// vec_ref.push("more".to_string());
+    /// assert_eq!(cache.get(&1).unwrap().len(), 3);
+    ///
+    /// // Fill remaining capacity
+    /// cache
+    ///     .try_get_or_insert_with_mut(2, |_| vec!["second".to_string()])
+    ///     .unwrap();
+    ///
+    /// // Fail when cache is at capacity and key doesn't exist
+    /// let result = cache.try_get_or_insert_with_mut(3, |_| vec!["third".to_string()]);
+    /// assert!(result.is_err());
+    /// assert_eq!(result.unwrap_err(), 3);
+    /// assert_eq!(cache.len(), 2); // Cache unchanged
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// This method is particularly useful for scenarios where you need to:
+    /// - Initialize complex data structures in-place
+    /// - Accumulate data in existing cache entries
+    /// - Avoid unnecessary allocations when the entry already exists
+    ///
+    /// ```rust
+    /// use std::{
+    ///     collections::HashMap,
+    ///     num::NonZeroUsize,
+    /// };
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<String, HashMap<String, i32>>::new(NonZeroUsize::new(3).unwrap());
+    ///
+    /// // Build up a map incrementally
+    /// let map_ref = cache
+    ///     .try_get_or_insert_with_mut("counters".to_string(), |_| HashMap::new())
+    ///     .unwrap();
+    /// map_ref.insert("clicks".to_string(), 1);
+    /// map_ref.insert("views".to_string(), 5);
+    ///
+    /// // Later, update the existing map
+    /// let map_ref = cache
+    ///     .try_get_or_insert_with_mut(
+    ///         "counters".to_string(),
+    ///         |_| HashMap::new(), // Not called since key exists
+    ///     )
+    ///     .unwrap();
+    /// *map_ref.get_mut("clicks").unwrap() += 1;
+    /// ```
+    pub fn try_get_or_insert_with_mut(
+        &mut self,
+        key: Key,
+        or_insert: impl FnOnce(&Key) -> Value,
+    ) -> Result<&mut Value, Key> {
+        let len = self.queue.len();
+        match self.queue.entry(key) {
+            indexmap::map::Entry::Occupied(o) => {
+                let index =
+                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+                Ok(self.queue[index].value_mut())
+            }
+            indexmap::map::Entry::Vacant(v) => {
+                if len >= self.capacity.get() {
+                    return Err(v.into_key());
+                }
+
+                let index = v.index();
+                let e = <PolicyType::MetadataType as Metadata<Value>>::EntryType::new(or_insert(
+                    v.key(),
+                ));
+                v.insert(e);
+                let index =
+                    PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
+                Ok(self.queue[index].value_mut())
+            }
+        }
+    }
+
+    /// The immutable version of `get_mut`. See [`Self::get_mut`] for details.
     pub fn get(&mut self, key: &Key) -> Option<&Value> {
         self.get_mut(key).map(|v| &*v)
     }
