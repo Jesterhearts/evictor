@@ -9,17 +9,16 @@ Generic in‑memory caches with pluggable eviction policies. One uniform API, ge
 
 ## Policies at a glance
 
-| Policy | Evicts                       | Primary signal                | Extra per‑entry bytes (approx)               | Notes                                     |
-| ------ | ---------------------------- | ----------------------------- | -------------------------------------------- | ----------------------------------------- |
-| Lru    | Least recently used          | Recency                       | 2 * usize (prev/next)                        | Doubly linked list of entries             |
-| Mru    | Most recently used           | Recency (inverted)            | 2 * usize                                    | Same structure as LRU, opposite victim    |
-| Lfu    | Least frequently used        | Frequency + recency tie break | 2 * usize + u64 + (bucket index bookkeeping) | Frequency buckets; O(1) amortized updates |
-| Fifo   | Oldest inserted              | Insertion order               | 2 * usize                                    | Queue semantics (head victim)             |
-| Lifo   | Newest inserted              | Insertion order               | 2 * usize                                    | Stack semantics (head victim)             |
-| Random | Random entry                 | RNG                           | None                                         | Requires `rand` feature (default)         |
-| Sieve  | First unvisited (2nd chance) | Visited bit pass              | 2 * usize + 1 byte                           | Implements NSDI'24 SIEVE (see paper)      |
+| Policy | Evicts                       | Primary signal                | Extra per‑entry bytes (approx)               | Notes                                         |
+| ------ | ---------------------------- | ----------------------------- | -------------------------------------------- | --------------------------------------------- |
+| Lru    | Least recently used          | Recency                       | 2 * usize (prev/next)                        | Doubly linked list of entries                 |
+| Mru    | Most recently used           | Recency (inverted)            | 2 * usize                                    | Same structure as LRU, opposite victim        |
+| Lfu    | Least frequently used        | Frequency + recency tie break | 2 * usize + u64 + (bucket index bookkeeping) | Frequency buckets; O(1) amortized updates     |
+| Fifo   | Oldest inserted              | Insertion order               | 2 * usize                                    | Queue semantics (head victim)                 |
+| Lifo   | Newest inserted              | Insertion order               | 2 * usize                                    | Stack semantics (head victim)                 |
+| Random | Random entry                 | RNG                           | None                                         | Requires `rand` feature (default)             |
+| Sieve  | First unvisited (2nd chance) | Visited bit pass              | 2 * usize + 1 byte                           | Implements NSDI'24 SIEVE (see [paper][paper]) |
 
-Paper reference for SIEVE: Junchen Yang et al., SIEVE (NSDI'24) – <https://junchengyang.com/publication/nsdi24-SIEVE.pdf>
 
 ## Quick start
 
@@ -114,3 +113,5 @@ patterns.
 ### License
 
 MIT OR Apache‑2.0. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+
+[paper]: https://junchengyang.com/publication/nsdi24-SIEVE.pdf
