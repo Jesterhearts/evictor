@@ -956,7 +956,7 @@ impl Statistics {
     ///
     /// This counter increments every time a new key-value pair is inserted into
     /// the cache, regardless of whether it causes an eviction. Updates to
-    /// existing keys also count as insertions.
+    /// existing keys do not count as insertions.
     ///
     /// # Examples
     ///
