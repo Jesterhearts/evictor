@@ -1215,6 +1215,85 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         }
     }
 
+    /// Gets a value from the cache, marking it as touched. If the key is not
+    /// present, inserts the default value and returns a reference to it.
+    ///
+    /// This method will trigger eviction if the cache is at capacity and the
+    /// key is not already present.
+    ///
+    /// # Type Requirements
+    ///
+    /// The value type must implement [`Default`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
+    ///
+    /// // Get or insert default (empty Vec<String>)
+    /// let vec_ref = cache.get_or_default(1);
+    /// assert!(vec_ref.is_empty());
+    ///
+    /// // Modify the value through another method
+    /// cache.get_mut(&1).unwrap().push("hello".to_string());
+    ///
+    /// // Subsequent calls return the existing value
+    /// let vec_ref = cache.get_or_default(1);
+    /// assert_eq!(vec_ref.len(), 1);
+    /// assert_eq!(vec_ref[0], "hello");
+    /// ```
+    pub fn get_or_default(&mut self, key: Key) -> &Value
+    where
+        Value: Default,
+    {
+        self.get_or_insert_with(key, |_| Value::default())
+    }
+
+    /// Gets a mutable value from the cache, marking it as touched. If the key
+    /// is not present, inserts the default value and returns a mutable
+    /// reference to it.
+    ///
+    /// This method will trigger eviction if the cache is at capacity and the
+    /// key is not already present.
+    ///
+    /// # Type Requirements
+    ///
+    /// The value type must implement [`Default`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
+    ///
+    /// // Get or insert default and modify it immediately
+    /// let vec_ref = cache.get_or_default_mut(1);
+    /// vec_ref.push("hello".to_string());
+    /// vec_ref.push("world".to_string());
+    ///
+    /// // Verify the changes were made
+    /// assert_eq!(cache.get(&1).unwrap().len(), 2);
+    /// assert_eq!(cache.get(&1).unwrap()[0], "hello");
+    ///
+    /// // Subsequent calls return the existing mutable value
+    /// let vec_ref = cache.get_or_default_mut(1);
+    /// vec_ref.clear();
+    /// assert!(cache.get(&1).unwrap().is_empty());
+    /// ```
+    pub fn get_or_default_mut(&mut self, key: Key) -> &mut Value
+    where
+        Value: Default,
+    {
+        self.get_or_insert_with_mut(key, |_| Value::default())
+    }
+
     /// Inserts a key-value pair into the cache.
     ///
     /// If the key already exists, its value is updated and the entry is marked
@@ -1537,9 +1616,6 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
 
     /// Returns the maximum number of entries the cache can hold.
     ///
-    /// This value is set when the cache is created and doesn't change during
-    /// the cache's lifetime.
-    ///
     /// # Examples
     ///
     /// ```rust
@@ -1553,6 +1629,228 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn capacity(&self) -> usize {
         self.capacity.get()
+    }
+
+    /// Sets a new capacity for the cache.
+    ///
+    /// If the new capacity is smaller than the current number of entries,
+    /// entries will be evicted according to the cache's eviction policy
+    /// until the cache size fits within the new capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The new maximum number of entries the cache can hold.
+    ///   Must be greater than zero.
+    ///
+    /// # Returns
+    ///
+    /// A vector of evicted entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert(1, "one".to_string());
+    /// cache.insert(2, "two".to_string());
+    /// cache.insert(3, "three".to_string());
+    /// assert_eq!(cache.len(), 3);
+    /// assert_eq!(cache.capacity(), 3);
+    ///
+    /// // Increase capacity
+    /// cache.set_capacity(NonZeroUsize::new(5).unwrap());
+    /// assert_eq!(cache.capacity(), 5);
+    /// assert_eq!(cache.len(), 3); // Existing entries remain
+    ///
+    /// // Decrease capacity - will evict entries
+    /// cache.set_capacity(NonZeroUsize::new(2).unwrap());
+    /// assert_eq!(cache.capacity(), 2);
+    /// assert_eq!(cache.len(), 2); // One entry was evicted
+    /// ```
+    pub fn set_capacity(&mut self, capacity: NonZeroUsize) -> Vec<(Key, Value)> {
+        let mut evicted = Vec::with_capacity(self.queue.len().saturating_sub(capacity.get()));
+        if capacity.get() < self.queue.len() {
+            // If new capacity is smaller than current size, we need to evict
+            // entries until we fit
+            while self.queue.len() > capacity.get()
+                && let Some(kv) = self.pop()
+            {
+                evicted.push(kv);
+            }
+        }
+        self.capacity = capacity;
+        evicted
+    }
+
+    /// Evicts entries from the cache until the size is reduced to the specified
+    /// number.
+    ///
+    /// This method removes entries according to the cache's eviction policy
+    /// until the cache contains at most `n` entries. If the cache already
+    /// has `n` or fewer entries, no eviction occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The target number of entries to keep in the cache
+    ///
+    /// # Returns
+    ///
+    /// A vector containing all evicted key-value pairs in the order they were
+    /// removed from the cache.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(5).unwrap());
+    ///
+    /// // Fill the cache
+    /// for i in 1..=5 {
+    ///     cache.insert(i, format!("value{}", i));
+    /// }
+    /// assert_eq!(cache.len(), 5);
+    ///
+    /// // Evict until only 2 entries remain
+    /// let evicted = cache.evict_to_size(2);
+    /// assert_eq!(cache.len(), 2);
+    /// assert_eq!(evicted.len(), 3);
+    ///
+    /// // The evicted entries follow the cache's eviction policy
+    /// // For LRU, oldest entries are evicted first
+    /// assert_eq!(evicted[0], (1, "value1".to_string()));
+    /// assert_eq!(evicted[1], (2, "value2".to_string()));
+    /// assert_eq!(evicted[2], (3, "value3".to_string()));
+    ///
+    /// // Cache now contains the most recently used entries
+    /// assert!(cache.contains_key(&4));
+    /// assert!(cache.contains_key(&5));
+    /// ```
+    ///
+    /// # Behavior with Different Cache Sizes
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert(1, "one".to_string());
+    /// cache.insert(2, "two".to_string());
+    ///
+    /// // No eviction when target size >= current size
+    /// let evicted = cache.evict_to_size(5);
+    /// assert_eq!(evicted.len(), 0);
+    /// assert_eq!(cache.len(), 2);
+    ///
+    /// // Evict to exact current size
+    /// let evicted = cache.evict_to_size(2);
+    /// assert_eq!(evicted.len(), 0);
+    /// assert_eq!(cache.len(), 2);
+    ///
+    /// // Evict to zero (clear cache)
+    /// let evicted = cache.evict_to_size(0);
+    /// assert_eq!(evicted.len(), 2);
+    /// assert_eq!(cache.len(), 0);
+    /// ```
+    pub fn evict_to_size(&mut self, n: usize) -> Vec<(Key, Value)> {
+        let mut evicted = Vec::with_capacity(n);
+        while self.queue.len() > n
+            && let Some(kv) = self.pop()
+        {
+            evicted.push(kv);
+        }
+        evicted
+    }
+
+    /// Evicts up to `n` entries from the cache according to the eviction
+    /// policy.
+    ///
+    /// This method removes at most `n` entries from the cache, following the
+    /// cache's eviction policy. If the cache contains fewer than `n` entries,
+    /// all remaining entries are evicted.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The maximum number of entries to evict
+    ///
+    /// # Returns
+    ///
+    /// A vector containing all evicted key-value pairs in the order they were
+    /// removed from the cache. The vector will contain at most `n` entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(5).unwrap());
+    ///
+    /// // Fill the cache
+    /// for i in 1..=5 {
+    ///     cache.insert(i, format!("value{}", i));
+    /// }
+    /// assert_eq!(cache.len(), 5);
+    ///
+    /// // Evict exactly 3 entries
+    /// let evicted = cache.evict_n_entries(3);
+    /// assert_eq!(cache.len(), 2);
+    /// assert_eq!(evicted.len(), 3);
+    ///
+    /// // For LRU, oldest entries are evicted first
+    /// assert_eq!(evicted[0], (1, "value1".to_string()));
+    /// assert_eq!(evicted[1], (2, "value2".to_string()));
+    /// assert_eq!(evicted[2], (3, "value3".to_string()));
+    ///
+    /// // Cache retains the most recently used entries
+    /// assert!(cache.contains_key(&4));
+    /// assert!(cache.contains_key(&5));
+    /// ```
+    ///
+    /// # Behavior with Edge Cases
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
+    /// cache.insert(1, "one".to_string());
+    /// cache.insert(2, "two".to_string());
+    ///
+    /// // Requesting more entries than available
+    /// let evicted = cache.evict_n_entries(5);
+    /// assert_eq!(evicted.len(), 2); // Only 2 entries were available
+    /// assert_eq!(cache.len(), 0); // Cache is now empty
+    ///
+    /// // Evicting from empty cache
+    /// let evicted = cache.evict_n_entries(3);
+    /// assert_eq!(evicted.len(), 0); // No entries to evict
+    /// assert_eq!(cache.len(), 0);
+    ///
+    /// // Evicting zero entries
+    /// cache.insert(1, "one".to_string());
+    /// let evicted = cache.evict_n_entries(0);
+    /// assert_eq!(evicted.len(), 0); // No eviction requested
+    /// assert_eq!(cache.len(), 1); // Cache unchanged
+    /// ```
+    pub fn evict_n_entries(&mut self, n: usize) -> Vec<(Key, Value)> {
+        let mut evicted = Vec::with_capacity(n);
+        for _ in 0..n {
+            if let Some(kv) = self.pop() {
+                evicted.push(kv);
+            } else {
+                break; // No more entries to evict
+            }
+        }
+        evicted
     }
 
     /// Returns an iterator over cache entries in eviction order.

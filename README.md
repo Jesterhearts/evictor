@@ -239,6 +239,15 @@ if let Some((key, value)) = cache.tail() {
     println!("Next to be evicted: {} -> {}", key, value);
 }
 
+// Get or insert default values
+let value = cache.get_or_default(5); // Gets existing or inserts Default::default()
+let mut_value = cache.get_or_default_mut(6); // Same but returns mutable reference
+
+// Capacity management
+let old_capacity = cache.capacity();
+cache.set_capacity(NonZeroUsize::new(5).unwrap()); // Change cache capacity
+cache.evict_to_size(2); // Evict entries until only 2 remain
+
 // Other operations
 cache.remove(&1); // Remove specific key
 if let Some((key, value)) = cache.pop() {
