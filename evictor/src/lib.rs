@@ -2994,6 +2994,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rand")]
     fn test_random_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -3127,6 +3128,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rand")]
     fn test_random_cache_debug() {
         use std::num::NonZeroUsize;
 

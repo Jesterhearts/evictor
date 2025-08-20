@@ -1,10 +1,11 @@
 # evictor
 
-[![Crates.io](https://img.shields.io/crates/v/evictor.svg)](https://crates.io/crates/evictor)
-[![Docs.rs](https://docs.rs/evictor/badge.svg)](https://docs.rs/evictor)
-[![Dependency status](https://deps.rs/repo/github/jesterhearts/evictor/status.svg)](https://deps.rs/repo/github/jesterhearts/evictor)
+[![Crates.io](https://img.shields.io/crates/v/evictor.svg?style=for-the-badge)](https://crates.io/crates/evictor)
+[![Docs.rs](https://img.shields.io/docsrs/evictor/latest?style=for-the-badge)](https://docs.rs/evictor)
+[![Dependency status](https://deps.rs/repo/github/jesterhearts/evictor/status.svg?style=for-the-badge)](https://deps.rs/repo/github/jesterhearts/evictor)
 
-Generic in‑memory caches with pluggable eviction policies. One uniform API, generic over key + value, O(1) average core ops, and interchangeable eviction behavior chosen by a type alias.
+Generic in‑memory caches with pluggable eviction policies. One uniform API, generic over key +
+value, O(1) average core ops, and interchangeable eviction behavior chosen by a type alias.
 
 ## Policies at a glance
 
@@ -42,7 +43,9 @@ Swap `Lru` for `Mru`, `Lfu`, `Fifo`, `Lifo`, `Random`, or `Sieve` to change beha
 
 ```rust
 use std::num::NonZeroUsize;
-use evictor::{Mru, Lfu, Fifo, Lifo, Random, Sieve};
+use evictor::{Mru, Lfu, Fifo, Lifo, Sieve};
+#[cfg(feature = "rand")]
+use evictor::Random;
 
 let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 mru.insert('a', 1);
@@ -69,7 +72,9 @@ sieve.insert(3, "z");  // evicts 2 (unvisited)
 (minimum 1).
 
 ```rust
-use evictor::{Lru, Mru, Lfu, Fifo, Lifo, Random, Sieve};
+use evictor::{Lru, Mru, Lfu, Fifo, Lifo, Sieve};
+#[cfg(feature = "rand")]
+use evictor::Random;
 
 let data = [(1, "one".to_string()), (2, "two".to_string()), (3, "three".to_string())];
 let lru: Lru<_, _> = data.into_iter().collect();
