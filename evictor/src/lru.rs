@@ -126,11 +126,19 @@ impl<T> Policy<T> for LruPolicy {
     ) {
         let Some(RemovedEntry {
             key, value, next, ..
-        }) = queue.swap_remove_ptr(ptr)
+        }) = queue.remove_ptr(ptr)
         else {
             return (Ptr::null(), None);
         };
         (next, Some((key, value)))
+    }
+
+    fn remove_key<K: std::hash::Hash + Eq>(
+        key: &K,
+        _: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
+        queue.remove(key).map(|removed| removed.1.value)
     }
 
     fn iter<'q, K>(

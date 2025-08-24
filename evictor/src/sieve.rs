@@ -121,12 +121,10 @@ impl<Value> Policy<Value> for SievePolicy {
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
                 let ptr = if make_room_on_insert {
-                    vacant_entry.push_unlinked(SieveEntry::new(value));
-                    move_hand_to_eviction_index(metadata, queue);
-                    let evicted_slash_replaced = metadata.hand;
-                    Self::remove_entry(evicted_slash_replaced, metadata, queue);
-                    queue.link_as_head(evicted_slash_replaced);
-                    evicted_slash_replaced
+                    let ptr = vacant_entry.push_unlinked(SieveEntry::new(value));
+                    Self::evict_entry(metadata, queue);
+                    queue.link_as_head(ptr);
+                    ptr
                 } else {
                     vacant_entry.insert_head(SieveEntry::new(value))
                 };
@@ -171,18 +169,27 @@ impl<Value> Policy<Value> for SievePolicy {
             value,
             prev,
             next,
-            invalidated,
             ..
-        }) = queue.swap_remove_ptr(ptr)
+        }) = queue.remove_ptr(ptr)
         else {
             return (Ptr::null(), None);
         };
         if ptr == metadata.hand {
-            metadata.hand = prev.or(queue.tail_ptr());
-        } else if metadata.hand == invalidated {
-            metadata.hand = ptr;
+            metadata.hand = prev;
         }
         (next, Some((key, value)))
+    }
+
+    fn remove_key<K: Hash + Eq>(
+        key: &K,
+        metadata: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<Value>>::EntryType>,
+    ) -> Option<<Self::MetadataType as Metadata<Value>>::EntryType> {
+        let (ptr, removed) = queue.remove(key)?;
+        if ptr == metadata.hand {
+            metadata.hand = removed.prev;
+        }
+        Some(removed.value)
     }
 
     fn iter<'q, K>(
@@ -282,13 +289,13 @@ fn build_into_entries_iter<K, Value>(
     }
 
     let mut entry = queue
-        .swap_remove_ptr(metadata.hand)
+        .remove_ptr(metadata.hand)
         .expect("Hand pointer invalid");
     let mut index = entry.prev.or(queue.tail_ptr());
     loop {
         skipped.push_back((entry.key, entry.value));
 
-        let Some(e) = queue.swap_remove_ptr(index) else {
+        let Some(e) = queue.remove_ptr(index) else {
             break;
         };
         entry = e;
@@ -362,7 +369,7 @@ impl<K, V> Iterator for IntoEntriesIter<K, V> {
     type Item = (K, SieveEntry<V>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(mut entry) = self.queue.swap_remove_ptr(self.index) {
+        if let Some(mut entry) = self.queue.remove_ptr(self.index) {
             self.index = entry.prev.or(self.queue.tail_ptr());
 
             if !entry.value.visited {
@@ -371,7 +378,7 @@ impl<K, V> Iterator for IntoEntriesIter<K, V> {
 
             loop {
                 self.skipped.push_back((entry.key, entry.value));
-                let Some(e) = self.queue.swap_remove_ptr(self.index) else {
+                let Some(e) = self.queue.remove_ptr(self.index) else {
                     break;
                 };
                 self.index = e.prev.or(self.queue.tail_ptr());

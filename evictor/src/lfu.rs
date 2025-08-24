@@ -117,12 +117,11 @@ impl<T> Policy<T> for LfuPolicy {
                     }
                 };
                 let ptr = if make_room_on_insert {
-                    entry.push_unlinked(LfuEntry::new(value));
-                    let evicted_slash_replaced = metadata.candidate_removal_index(queue);
-                    Self::remove_entry(evicted_slash_replaced, metadata, queue);
+                    let ptr = entry.push_unlinked(LfuEntry::new(value));
+                    Self::evict_entry(metadata, queue);
 
-                    queue.link_as_tail(evicted_slash_replaced);
-                    evicted_slash_replaced
+                    queue.link_as_tail(ptr);
+                    ptr
                 } else {
                     entry.insert_tail(LfuEntry::new(value))
                 };
@@ -182,12 +181,19 @@ impl<T> Policy<T> for LfuPolicy {
                     next.head, next.tail,
                     "Head and tail should not be the same after moving an element"
                 );
-            } else {
-                debug_assert!(
-                    *next_freq > new_frequency,
-                    "Frequency buckets should be in increasing order, got {next_freq} and {new_frequency}"
-                );
+            } else if *next_freq > new_frequency {
                 queue.move_before(index, next.head);
+                bucket_cursor.insert_after_move_to(
+                    new_frequency,
+                    FreqBucket {
+                        tail: index,
+                        head: index,
+                    },
+                );
+
+                bucket_cursor.move_prev();
+            } else {
+                queue.move_to_tail(index);
                 bucket_cursor.insert_after_move_to(
                     new_frequency,
                     FreqBucket {
@@ -240,15 +246,12 @@ impl<T> Policy<T> for LfuPolicy {
                 value: _,
                 prev,
                 next,
-                invalidated,
             } = bucket_cursor
                 .remove()
                 .expect("Bucket should exist for frequency");
 
             if metadata.head_bucket == removed {
                 metadata.head_bucket = next.or(prev)
-            } else if metadata.head_bucket == invalidated {
-                metadata.head_bucket = removed;
             }
         } else {
             if old.head == index {
@@ -268,64 +271,23 @@ impl<T> Policy<T> for LfuPolicy {
         Ptr,
         Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
     ) {
-        let Some(RemovedEntry {
-            key,
-            value,
-            prev,
-            next,
-            invalidated,
-        }) = queue.swap_remove_ptr(ptr)
-        else {
+        let Some(removed) = queue.remove_ptr(ptr) else {
             return (Ptr::null(), None);
         };
 
-        let mut bucket_cursor = metadata
-            .frequency_head_tail
-            .key_cursor_mut(&value.frequency);
+        finish_removal(ptr, metadata, removed)
+    }
 
-        let Some((_, bucket)) = bucket_cursor.current_mut() else {
-            unreachable!("Bucket should exist for frequency {}", value.frequency);
-        };
+    fn remove_key<K: Hash + Eq>(
+        key: &K,
+        metadata: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
+        let (ptr, removed) = queue.remove(key)?;
 
-        if bucket.head == bucket.tail {
-            debug_assert_eq!(
-                bucket.head, ptr,
-                "Head and tail should be the same when only one element exists in the bucket"
-            );
-            let current = bucket_cursor.ptr();
-            let RemovedEntry {
-                key: _,
-                value: _,
-                prev,
-                next,
-                invalidated,
-            } = bucket_cursor.remove().unwrap();
-            if metadata.head_bucket == current {
-                metadata.head_bucket = prev.or(next)
-            } else if metadata.head_bucket == invalidated {
-                metadata.head_bucket = current;
-            }
-        } else {
-            if bucket.head == ptr {
-                bucket.head = next;
-            }
-            if bucket.tail == ptr {
-                bucket.tail = prev;
-            }
-        }
-
-        if let Some(entry) = queue.ptr_get(ptr)
-            && let Some(bucket) = metadata.frequency_head_tail.get_mut(&entry.frequency)
-        {
-            if bucket.head == invalidated {
-                bucket.head = ptr;
-            }
-            if bucket.tail == invalidated {
-                bucket.tail = ptr;
-            }
-        }
-
-        (next, Some((key, value)))
+        finish_removal(ptr, metadata, removed)
+            .1
+            .map(|(_, entry)| entry)
     }
 
     fn iter<'q, K>(
@@ -387,6 +349,49 @@ impl<T> Policy<T> for LfuPolicy {
             );
         }
     }
+}
+
+fn finish_removal<K, T>(
+    ptr: Ptr,
+    metadata: &mut LfuMetadata,
+    removed: RemovedEntry<K, LfuEntry<T>>,
+) -> (Ptr, Option<(K, LfuEntry<T>)>) {
+    let mut bucket_cursor = metadata
+        .frequency_head_tail
+        .key_cursor_mut(&removed.value.frequency);
+
+    let Some((_, bucket)) = bucket_cursor.current_mut() else {
+        unreachable!(
+            "Bucket should exist for frequency {}",
+            removed.value.frequency
+        );
+    };
+
+    if bucket.head == bucket.tail {
+        debug_assert_eq!(
+            bucket.head, ptr,
+            "Head and tail should be the same when only one element exists in the bucket"
+        );
+        let current = bucket_cursor.ptr();
+        let RemovedEntry {
+            key: _,
+            value: _,
+            prev,
+            next,
+        } = bucket_cursor.remove().unwrap();
+        if metadata.head_bucket == current {
+            metadata.head_bucket = prev.or(next)
+        }
+    } else {
+        if bucket.head == ptr {
+            bucket.head = removed.next;
+        }
+        if bucket.tail == ptr {
+            bucket.tail = removed.prev;
+        }
+    }
+
+    (removed.next, Some((removed.key, removed.value)))
 }
 
 #[doc(hidden)]

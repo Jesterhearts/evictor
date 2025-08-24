@@ -258,6 +258,7 @@ pub trait Policy<T>: private::Sealed {
     /// The iterator type returned by `into_iter()`.
     type IntoIter<K>: Iterator<Item = (K, T)>;
 
+    #[track_caller]
     fn insert_or_update_entry<K: Hash + Eq>(
         key: K,
         make_room_on_insert: bool,
@@ -278,6 +279,7 @@ pub trait Policy<T>: private::Sealed {
     ///
     /// # Returns
     /// The new index of the entry after any reordering
+    #[track_caller]
     fn touch_entry<K: Hash + Eq>(
         ptr: Ptr,
         metadata: &mut Self::MetadataType,
@@ -288,6 +290,7 @@ pub trait Policy<T>: private::Sealed {
     /// entry in the queue after removal, and the removed key-value pair if
     /// available.
     #[inline]
+    #[track_caller]
     fn evict_entry<K: Hash + Eq>(
         metadata: &mut Self::MetadataType,
         queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
@@ -317,6 +320,7 @@ pub trait Policy<T>: private::Sealed {
     /// - A pointer to the next entry in the queue after removal
     /// - The removed key-value pair, or None if the index was invalid
     #[allow(clippy::type_complexity)]
+    #[track_caller]
     fn remove_entry<K: Hash + Eq>(
         ptr: Ptr,
         metadata: &mut Self::MetadataType,
@@ -325,6 +329,13 @@ pub trait Policy<T>: private::Sealed {
         Ptr,
         Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
     );
+
+    #[track_caller]
+    fn remove_key<K: Hash + Eq>(
+        key: &K,
+        metadata: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType>;
 
     /// Returns an iterator over the entries in the cache in eviction order.
     ///
@@ -2190,13 +2201,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// );
     /// ```
     pub fn remove(&mut self, key: &Key) -> Option<Value> {
-        if let Some(index) = self.queue.get_ptr(key) {
-            PolicyType::remove_entry(index, &mut self.metadata, &mut self.queue)
-                .1
-                .map(|(_, entry)| entry.into_value())
-        } else {
-            None
-        }
+        PolicyType::remove_key(key, &mut self.metadata, &mut self.queue)
+            .map(|entry| entry.into_value())
     }
 
     /// Returns true if the cache contains no entries.
@@ -2766,6 +2772,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                 next = self.queue.ptr_cursor_mut(ptr);
             } else {
                 next.move_next();
+                if next.at_head() {
+                    break;
+                }
             }
         }
     }

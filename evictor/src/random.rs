@@ -104,9 +104,9 @@ impl<T> Policy<T> for RandomPolicy {
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
                 let ptr = if make_room_on_insert {
-                    vacant_entry.insert_tail(RandomEntry::new(value));
-                    queue.swap_remove_ptr(would_evict);
-                    would_evict
+                    let ptr = vacant_entry.insert_tail(RandomEntry::new(value));
+                    Self::remove_entry(would_evict, metadata, queue);
+                    ptr
                 } else {
                     vacant_entry.insert_tail(RandomEntry::new(value))
                 };
@@ -132,11 +132,19 @@ impl<T> Policy<T> for RandomPolicy {
     ) {
         let Some(RemovedEntry {
             key, value, next, ..
-        }) = queue.swap_remove_ptr(ptr)
+        }) = queue.remove_ptr(ptr)
         else {
             return (Ptr::null(), None);
         };
         (next, Some((key, value)))
+    }
+
+    fn remove_key<K: std::hash::Hash + Eq>(
+        key: &K,
+        _: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
+        queue.remove(key).map(|removed| removed.1.value)
     }
 
     fn iter<'q, K>(
