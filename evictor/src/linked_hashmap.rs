@@ -6,10 +6,11 @@ use std::{
     },
 };
 
-use indexmap::{
-    IndexMap,
-    map,
+use hashbrown::{
+    HashTable,
+    hash_table,
 };
+use slab::Slab;
 
 use crate::RandomState;
 
@@ -69,8 +70,11 @@ impl Ptr {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Link {
+#[derive(Debug, Clone)]
+struct LLNode<K, T> {
+    key: K,
+    value: T,
+    hash: u64,
     prev: Ptr,
     next: Ptr,
 }
@@ -80,8 +84,9 @@ struct Link {
 pub struct LinkedHashMap<K, T> {
     head: Ptr,
     tail: Ptr,
-    links: Vec<Link>,
-    map: IndexMap<K, T, RandomState>,
+    nodes: Slab<LLNode<K, T>>,
+    table: HashTable<Ptr>,
+    hasher: RandomState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +96,6 @@ pub struct RemovedEntry<K, T> {
     pub value: T,
     pub prev: Ptr,
     pub next: Ptr,
-    pub invalidated: Ptr,
 }
 
 impl<K: std::fmt::Debug, T: std::fmt::Debug> std::fmt::Debug for LinkedHashMap<K, T> {
@@ -107,13 +111,20 @@ impl<K: std::fmt::Debug, T: std::fmt::Debug> std::fmt::Debug for LinkedHashMap<K
 
         let mut entries = Vec::with_capacity(self.len());
 
-        for (index, (k, value)) in self.map.iter().enumerate() {
-            let link = &self.links[index];
-            let next_key = self.key_for_ptr(link.next);
-            let prev_key = self.key_for_ptr(link.prev);
+        for ptr in self.table.iter().copied() {
+            let Some(key) = self.key_for_ptr(ptr) else {
+                continue;
+            };
+            let Some(value) = self.ptr_get(ptr) else {
+                continue;
+            };
+            let next = self.next_ptr(ptr).unwrap_or_default();
+            let prev = self.prev_ptr(ptr).unwrap_or_default();
+            let next_key = self.key_for_ptr(next);
+            let prev_key = self.key_for_ptr(prev);
 
             entries.push(Entry {
-                key: k,
+                key,
                 value,
                 previous: prev_key,
                 next: next_key,
@@ -136,8 +147,9 @@ impl<K, T> Default for LinkedHashMap<K, T> {
         LinkedHashMap {
             head: Ptr::null(),
             tail: Ptr::null(),
-            links: Vec::new(),
-            map: IndexMap::default(),
+            nodes: Slab::new(),
+            table: HashTable::new(),
+            hasher: RandomState::default(),
         }
     }
 }
@@ -148,12 +160,16 @@ impl<K, T> LinkedHashMap<K, T> {
         LinkedHashMap {
             head: Ptr::null(),
             tail: Ptr::null(),
-            links: Vec::with_capacity(capacity),
-            map: IndexMap::with_capacity_and_hasher(capacity, RandomState::default()),
+            nodes: Slab::with_capacity(capacity),
+            table: HashTable::with_capacity(capacity),
+            hasher: RandomState::default(),
         }
     }
 
     pub fn index_ptr_unstable(&self, index: usize) -> Option<Ptr> {
+        if index >= self.len() {
+            return None;
+        }
         Some(Ptr::unchecked_from(index))
     }
 
@@ -169,41 +185,41 @@ impl<K, T> LinkedHashMap<K, T> {
             return None;
         }
 
-        let after_index = after.get()?;
+        let after_index: usize = after.get()?;
         let moved_index = moved.get()?;
 
-        let [moved_links, after_links] = &mut self
-            .links
+        let [moved_node, after_node] = self
+            .nodes
             .get_disjoint_mut([moved_index, after_index])
             .ok()?;
 
-        if after_links.next == moved {
+        if after == self.tail && moved == self.head {
+            self.tail = moved;
+            self.head = moved_node.next;
+            return Some(());
+        }
+
+        if after_node.next == moved {
             return None;
         }
-        let needs_next = moved_links.prev;
-        let needs_prev = moved_links.next;
-        let also_needs_prev = after_links.next;
 
-        moved_links.next = after_links.next;
-        moved_links.prev = after;
-        after_links.next = moved;
+        let needs_next = moved_node.prev;
+        let needs_prev = moved_node.next;
+        let also_needs_prev = after_node.next;
 
-        if let Some(needs_prev) = self.links.get_mut(also_needs_prev.unchecked_get()) {
-            needs_prev.prev = moved;
-        }
+        moved_node.next = after_node.next;
+        moved_node.prev = after;
+        after_node.next = moved;
 
-        if let Some(needs_next) = self.links.get_mut(needs_next.unchecked_get()) {
-            needs_next.next = needs_prev;
-        }
-        if let Some(needs_prev) = self.links.get_mut(needs_prev.unchecked_get()) {
-            needs_prev.prev = needs_next;
-        }
+        self.nodes[also_needs_prev.unchecked_get()].prev = moved;
+        self.nodes[needs_next.unchecked_get()].next = needs_prev;
+        self.nodes[needs_prev.unchecked_get()].prev = needs_next;
 
         if self.head == moved {
-            self.head = needs_prev;
+            self.head = needs_prev.or(needs_next);
         }
         if self.tail == moved {
-            self.tail = needs_next;
+            self.tail = needs_next.or(needs_prev);
         }
 
         if self.tail == after {
@@ -221,38 +237,37 @@ impl<K, T> LinkedHashMap<K, T> {
         let before_index = before.get()?;
         let moved_index = moved.get()?;
 
-        let [moved_links, before_links] = &mut self
-            .links
+        let [moved_node, before_node] = self
+            .nodes
             .get_disjoint_mut([moved_index, before_index])
             .ok()?;
 
-        if before_links.prev == moved {
+        if before == self.head && moved == self.tail {
+            self.head = moved;
+            self.tail = moved_node.prev;
+            return Some(());
+        }
+
+        if before_node.prev == moved {
             return None;
         }
-        let needs_next = moved_links.prev;
-        let needs_prev = moved_links.next;
-        let also_needs_next = before_links.prev;
+        let needs_next = moved_node.prev;
+        let needs_prev = moved_node.next;
+        let also_needs_next = before_node.prev;
 
-        moved_links.prev = before_links.prev;
-        moved_links.next = before;
-        before_links.prev = moved;
+        moved_node.prev = before_node.prev;
+        moved_node.next = before;
+        before_node.prev = moved;
 
-        if let Some(needs_next) = self.links.get_mut(also_needs_next.unchecked_get()) {
-            needs_next.next = moved;
-        }
-
-        if let Some(needs_next) = self.links.get_mut(needs_next.unchecked_get()) {
-            needs_next.next = needs_prev;
-        }
-        if let Some(needs_prev) = self.links.get_mut(needs_prev.unchecked_get()) {
-            needs_prev.prev = needs_next;
-        }
+        self.nodes[also_needs_next.unchecked_get()].next = moved;
+        self.nodes[needs_prev.unchecked_get()].prev = needs_next;
+        self.nodes[needs_next.unchecked_get()].next = needs_prev;
 
         if self.head == moved {
-            self.head = needs_prev;
+            self.head = needs_prev.or(needs_next);
         }
         if self.tail == moved {
-            self.tail = needs_next;
+            self.tail = needs_next.or(needs_prev);
         }
 
         if self.head == before {
@@ -263,49 +278,48 @@ impl<K, T> LinkedHashMap<K, T> {
     }
 
     pub fn link_as_head(&mut self, ptr: Ptr) -> Option<()> {
-        let old_head = self.head;
-        self.link_node(ptr, Ptr::null(), old_head)
+        self.link_node(ptr, self.tail, self.head, true)
     }
 
     pub fn link_as_tail(&mut self, ptr: Ptr) -> Option<()> {
-        let old_tail = self.tail;
-        self.link_node(ptr, old_tail, Ptr::null())
+        self.link_node(ptr, self.tail, self.head, false)
     }
 
-    pub fn link_node(&mut self, ptr: Ptr, prev: Ptr, next: Ptr) -> Option<()> {
+    fn link_node(&mut self, ptr: Ptr, prev: Ptr, next: Ptr, as_head: bool) -> Option<()> {
         debug_assert_ne!(ptr, Ptr::null(), "Cannot link null pointer");
 
-        if !prev.is_null() {
-            self.links[prev.unchecked_get()].next = ptr;
-        }
-        if !next.is_null() {
-            self.links[next.unchecked_get()].prev = ptr;
-        }
+        if self.head == Ptr::null() && self.tail == Ptr::null() {
+            debug_assert_eq!(prev, Ptr::null());
+            debug_assert_eq!(next, Ptr::null());
 
-        let link = &mut self.links[ptr.unchecked_get()];
-        link.prev = prev;
-        link.next = next;
-
-        if self.head == next {
             self.head = ptr;
-        } else if self.head == ptr {
-            self.head = prev;
-        }
-        if self.tail == prev {
             self.tail = ptr;
-        } else if self.tail == ptr {
-            self.tail = next;
+            self.nodes[ptr.unchecked_get()].next = ptr;
+            self.nodes[ptr.unchecked_get()].prev = ptr;
+            return Some(());
+        }
+
+        self.nodes[prev.unchecked_get()].next = ptr;
+        self.nodes[next.unchecked_get()].prev = ptr;
+
+        self.nodes[ptr.unchecked_get()].prev = prev;
+        self.nodes[ptr.unchecked_get()].next = next;
+
+        if as_head {
+            self.head = ptr;
+        } else {
+            self.tail = ptr;
         }
 
         Some(())
     }
 
-    pub fn move_to_tail(&mut self, moved: Ptr) {
-        self.move_after(moved, self.tail_ptr());
+    pub fn move_to_tail(&mut self, moved: Ptr) -> Option<()> {
+        self.move_after(moved, self.tail_ptr())
     }
 
-    pub fn move_to_head(&mut self, moved: Ptr) {
-        self.move_before(moved, self.head_ptr());
+    pub fn move_to_head(&mut self, moved: Ptr) -> Option<()> {
+        self.move_before(moved, self.head_ptr())
     }
 
     pub fn ptr_cursor_mut(&'_ mut self, ptr: Ptr) -> CursorMut<'_, K, T> {
@@ -313,11 +327,11 @@ impl<K, T> LinkedHashMap<K, T> {
     }
 
     pub fn next_ptr(&self, ptr: Ptr) -> Option<Ptr> {
-        self.links[ptr.get()?].next.optional()
+        self.nodes[ptr.get()?].next.optional()
     }
 
     pub fn prev_ptr(&self, ptr: Ptr) -> Option<Ptr> {
-        self.links[ptr.get()?].prev.optional()
+        self.nodes[ptr.get()?].prev.optional()
     }
 
     pub fn head_cursor_mut(&'_ mut self) -> CursorMut<'_, K, T> {
@@ -342,123 +356,104 @@ impl<K, T> LinkedHashMap<K, T> {
         self.tail
     }
 
-    pub fn swap_remove_ptr(&mut self, ptr: Ptr) -> Option<RemovedEntry<K, T>> {
+    #[track_caller]
+    pub fn remove_ptr(&mut self, ptr: Ptr) -> Option<RemovedEntry<K, T>> {
         if ptr.is_null() {
             return None;
         }
 
-        let invalidated = Ptr::unchecked_from(self.map.len().checked_sub(1)?);
-
-        let (key, value) = self.map.swap_remove_index(ptr.unchecked_get())?;
-        let link = self.links.swap_remove(ptr.unchecked_get());
-
-        let next = if link.next == invalidated {
-            ptr
-        } else {
-            link.next
-        };
-        let prev = if link.prev == invalidated {
-            ptr
-        } else {
-            link.prev
+        let node = self.nodes.remove(ptr.unchecked_get());
+        match self.table.find_entry(node.hash, move |k| *k == ptr) {
+            Ok(occupied) => {
+                occupied.remove();
+            }
+            Err(_) => {
+                #[cfg(debug_assertions)]
+                unreachable!("Pointer not found in table: {ptr:?}, {:#?}", self.table);
+            }
         };
 
-        if ptr.unchecked_get() < self.map.len() {
-            let perturbed = &mut self.links[ptr.unchecked_get()];
-            let update_prev = perturbed.next;
-            if update_prev == ptr {
-                perturbed.next = Ptr::null();
-            }
-            let update_next = perturbed.prev;
-            if update_next == ptr {
-                perturbed.prev = Ptr::null();
-            }
+        self.finish_removal(ptr, node)
+    }
 
-            if update_prev != ptr
-                && let Some(update_prev) = self.links.get_mut(update_prev.unchecked_get())
-            {
-                update_prev.prev = ptr;
+    fn finish_removal(&mut self, ptr: Ptr, node: LLNode<K, T>) -> Option<RemovedEntry<K, T>> {
+        if self.head == ptr && self.tail == ptr {
+            self.head = Ptr::null();
+            self.tail = Ptr::null();
+            Some(RemovedEntry {
+                key: node.key,
+                value: node.value,
+                prev: Ptr::null(),
+                next: Ptr::null(),
+            })
+        } else {
+            let next = node.next;
+            let prev = node.prev;
+            self.nodes[prev.unchecked_get()].next = node.next;
+            self.nodes[next.unchecked_get()].prev = node.prev;
+
+            if self.tail == ptr {
+                self.tail = node.prev;
             }
-            if update_next != ptr
-                && let Some(update_next) = self.links.get_mut(update_next.unchecked_get())
-            {
-                update_next.next = ptr;
+            if self.head == ptr {
+                self.head = node.next;
             }
+            Some(RemovedEntry {
+                key: node.key,
+                value: node.value,
+                prev: node.prev,
+                next: node.next,
+            })
         }
-
-        if let Some(update_prev) = self.links.get_mut(next.unchecked_get()) {
-            update_prev.prev = prev;
-        }
-        if let Some(update_next) = self.links.get_mut(prev.unchecked_get()) {
-            update_next.next = next;
-        }
-
-        if self.tail == ptr {
-            self.tail = prev;
-        } else if self.tail == invalidated {
-            self.tail = ptr;
-        }
-        if self.head == ptr {
-            self.head = next;
-        } else if self.head == invalidated {
-            self.head = ptr;
-        }
-
-        Some(RemovedEntry {
-            key,
-            value,
-            prev,
-            next,
-            invalidated,
-        })
     }
 
     pub fn ptr_get(&self, ptr: Ptr) -> Option<&T> {
-        self.map
-            .get_index(ptr.unchecked_get())
-            .map(|(_, value)| value)
+        Some(&self.nodes[ptr.get()?].value)
     }
 
     pub fn ptr_get_entry(&self, ptr: Ptr) -> Option<(&K, &T)> {
-        self.map.get_index(ptr.unchecked_get())
+        let node = &self.nodes[ptr.get()?];
+        Some((&node.key, &node.value))
     }
 
     pub fn ptr_get_entry_mut(&mut self, ptr: Ptr) -> Option<(&K, &mut T)> {
-        self.map.get_index_mut(ptr.unchecked_get())
+        let node = &mut self.nodes[ptr.get()?];
+        Some((&node.key, &mut node.value))
     }
 
     pub fn ptr_get_mut(&mut self, ptr: Ptr) -> Option<&mut T> {
-        self.map
-            .get_index_mut(ptr.unchecked_get())
-            .map(|(_, value)| value)
+        Some(&mut self.nodes[ptr.get()?].value)
     }
 
     pub fn key_for_ptr(&self, ptr: Ptr) -> Option<&K> {
-        self.map.get_index(ptr.unchecked_get()).map(|(k, _)| k)
+        Some(&self.nodes[ptr.get()?].key)
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.table.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.len() == 0
     }
 
     pub fn clear(&mut self) {
-        self.map.clear();
-        self.links.clear();
+        self.table.clear();
+        self.nodes.clear();
         self.head = Ptr::null();
         self.tail = Ptr::null();
     }
 
     pub fn shrink_to_fit(&mut self) {
-        self.map.shrink_to_fit();
+        self.table
+            .shrink_to_fit(|k| self.nodes[k.unchecked_get()].hash);
+        self.nodes.shrink_to_fit();
     }
 
     pub fn iter(&'_ self) -> Iter<'_, K, T> {
         Iter {
             ptr: self.head,
+            end: self.head,
             map: self,
         }
     }
@@ -466,28 +461,29 @@ impl<K, T> LinkedHashMap<K, T> {
     pub fn iter_rev(&'_ self) -> IterRev<'_, K, T> {
         IterRev {
             ptr: self.tail,
+            end: self.tail,
             map: self,
         }
     }
 
     pub fn into_iter(self) -> IntoIter<K, T> {
         IntoIter {
-            values: self.map.into_iter().map(Some).collect(),
-            links: self.links,
+            nodes: self.nodes,
+            end: self.head,
             ptr: self.head,
         }
     }
 
     pub fn into_iter_rev(self) -> IntoIterRev<K, T> {
         IntoIterRev {
-            values: self.map.into_iter().map(Some).collect(),
-            links: self.links,
+            nodes: self.nodes,
+            end: self.tail,
             ptr: self.tail,
         }
     }
 
     pub fn contains_ptr(&self, ptr: Ptr) -> bool {
-        ptr.unchecked_get() < self.map.len()
+        ptr.unchecked_get() < self.len()
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
@@ -502,32 +498,31 @@ impl<K, T> LinkedHashMap<K, T> {
         assert_ne!(self.tail, Ptr::null(), "Tail pointer is invalid");
         assert_eq!(
             self.prev_ptr(self.head),
-            None,
-            "Head should not have a previous link"
+            Some(self.tail),
+            "Head should link to tail"
         );
         assert_eq!(
             self.next_ptr(self.tail),
-            None,
-            "Tail should not have a next link"
+            Some(self.head),
+            "Tail should link to head"
         );
         assert_eq!(
-            self.links.len(),
-            self.map.len(),
+            self.len(),
+            self.table.len(),
             "Links and map should have the same length"
         );
 
-        for (index, link) in self.links.iter().enumerate() {
-            let ptr = Ptr::unchecked_from(index);
+        for ptr in self.table.iter().copied() {
+            let node = &self.nodes[ptr.unchecked_get()];
 
             if ptr == self.head {
                 assert_eq!(
-                    link.prev,
-                    Ptr::null(),
+                    node.prev, self.tail,
                     "Head pointer should not have a previous link"
                 );
             } else {
                 assert_ne!(
-                    link.prev,
+                    node.prev,
                     Ptr::null(),
                     "Non-head pointer should have a previous link: {ptr:?} head: {:?}",
                     self.head
@@ -536,13 +531,12 @@ impl<K, T> LinkedHashMap<K, T> {
 
             if ptr == self.tail {
                 assert_eq!(
-                    link.next,
-                    Ptr::null(),
+                    node.next, self.head,
                     "Tail pointer should not have a next link"
                 );
             } else {
                 assert_ne!(
-                    link.next,
+                    node.next,
                     Ptr::null(),
                     "Non-tail pointer should have a next link: {ptr:?} tail: {:?}",
                     self.tail
@@ -586,45 +580,74 @@ impl<K: Hash + Eq, T> LinkedHashMap<K, T> {
     }
 
     pub fn key_cursor_mut(&'_ mut self, key: &K) -> CursorMut<'_, K, T> {
+        let hash = self.hasher.hash_one(key);
         let ptr = self
-            .map
-            .get_index_of(key)
-            .map(Ptr::unchecked_from)
+            .table
+            .find(hash, |k| self.nodes[k.unchecked_get()].key == *key)
+            .copied()
             .unwrap_or_default();
         CursorMut { ptr, map: self }
     }
 
     pub fn entry(&'_ mut self, key: K) -> Entry<'_, K, T> {
-        match self.map.entry(key) {
-            map::Entry::Occupied(entry) => Entry::Occupied(OccupiedEntry { entry }),
-            map::Entry::Vacant(entry) => Entry::Vacant(VacantEntry {
+        let hash = self.hasher.hash_one(&key);
+        match self.table.entry(
+            hash,
+            |k| self.nodes[k.unchecked_get()].key == key,
+            |idx| self.nodes[idx.unchecked_get()].hash,
+        ) {
+            hash_table::Entry::Occupied(entry) => Entry::Occupied(OccupiedEntry {
+                node: &mut self.nodes[entry.get().unchecked_get()],
                 entry,
+            }),
+            hash_table::Entry::Vacant(entry) => Entry::Vacant(VacantEntry {
+                entry,
+                key,
+                hash,
+                nodes: &mut self.nodes,
                 head: &mut self.head,
                 tail: &mut self.tail,
-                links: &mut self.links,
             }),
         }
     }
 
-    pub fn swap_remove(&mut self, key: &K) -> Option<RemovedEntry<K, T>> {
-        let ptr = Ptr::unchecked_from(self.map.get_index_of(key)?);
-        self.swap_remove_ptr(ptr)
+    #[track_caller]
+    #[inline]
+    pub fn remove(&mut self, key: &K) -> Option<(Ptr, RemovedEntry<K, T>)> {
+        let hash = self.hasher.hash_one(key);
+        match self
+            .table
+            .find_entry(hash, |k| self.nodes[k.unchecked_get()].key == *key)
+        {
+            Ok(occupied) => {
+                let ptr = *occupied.get();
+                let node = self.nodes.remove(ptr.unchecked_get());
+                occupied.remove();
+                self.finish_removal(ptr, node).map(|entry| (ptr, entry))
+            }
+            Err(_) => None,
+        }
     }
 
     pub fn get_ptr(&self, key: &K) -> Option<Ptr> {
-        self.map.get_index_of(key).map(Ptr::unchecked_from)
+        let hash = self.hasher.hash_one(key);
+        self.table
+            .find(hash, |k| self.nodes[k.unchecked_get()].key == *key)
+            .copied()
     }
 
     pub fn get(&self, key: &K) -> Option<&T> {
-        self.map.get(key)
+        let ptr = self.get_ptr(key)?;
+        self.ptr_get(ptr)
     }
 
     pub fn get_mut(&mut self, key: &K) -> Option<&mut T> {
-        self.map.get_mut(key)
+        let ptr = self.get_ptr(key)?;
+        self.ptr_get_mut(ptr)
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
-        self.map.contains_key(key)
+        self.get_ptr(key).is_some()
     }
 }
 
@@ -637,30 +660,32 @@ pub struct CursorMut<'m, K, T> {
 
 impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
     pub fn insert_after_move_to(&mut self, key: K, value: T) -> Option<T> {
+        let ptr = self.ptr.or(self.map.tail);
         match self.map.entry(key) {
             Entry::Occupied(occupied_entry) => {
-                let ptr = occupied_entry.ptr();
-                self.map.move_after(ptr, self.ptr);
-                self.ptr = ptr;
-                Some(std::mem::replace(self.map.ptr_get_mut(ptr)?, value))
+                let map_ptr = occupied_entry.ptr();
+                self.map.move_after(map_ptr, ptr);
+                self.ptr = map_ptr;
+                Some(std::mem::replace(self.map.ptr_get_mut(map_ptr)?, value))
             }
             Entry::Vacant(vacant_entry) => {
-                self.ptr = vacant_entry.insert_after(value, self.ptr);
+                self.ptr = vacant_entry.insert_after(value, ptr);
                 None
             }
         }
     }
 
     pub fn insert_before_move_to(&mut self, key: K, value: T) -> Option<T> {
+        let ptr = self.ptr.or(self.map.head);
         match self.map.entry(key) {
             Entry::Occupied(occupied_entry) => {
-                let ptr = occupied_entry.ptr();
-                self.map.move_before(ptr, self.ptr);
-                self.ptr = ptr;
-                Some(std::mem::replace(self.map.ptr_get_mut(ptr)?, value))
+                let map_ptr = occupied_entry.ptr();
+                self.map.move_before(map_ptr, ptr);
+                self.ptr = map_ptr;
+                Some(std::mem::replace(self.map.ptr_get_mut(map_ptr)?, value))
             }
             Entry::Vacant(vacant_entry) => {
-                self.ptr = vacant_entry.insert_before(value, self.ptr);
+                self.ptr = vacant_entry.insert_before(value, ptr);
                 None
             }
         }
@@ -669,6 +694,7 @@ impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
     pub fn iter(&self) -> Iter<'_, K, T> {
         Iter {
             ptr: self.ptr,
+            end: self.map.head,
             map: self.map,
         }
     }
@@ -676,6 +702,7 @@ impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
     pub fn iter_rev(&self) -> IterRev<'_, K, T> {
         IterRev {
             ptr: self.ptr,
+            end: self.map.tail,
             map: self.map,
         }
     }
@@ -685,15 +712,15 @@ impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
     }
 
     pub fn remove_prev(&mut self) -> Option<RemovedEntry<K, T>> {
-        self.map.swap_remove_ptr(self.map.prev_ptr(self.ptr)?)
+        self.map.remove_ptr(self.map.prev_ptr(self.ptr)?)
     }
 
     pub fn remove_next(&mut self) -> Option<RemovedEntry<K, T>> {
-        self.map.swap_remove_ptr(self.map.next_ptr(self.ptr)?)
+        self.map.remove_ptr(self.map.next_ptr(self.ptr)?)
     }
 
     pub fn remove(self) -> Option<RemovedEntry<K, T>> {
-        self.map.swap_remove_ptr(self.ptr)
+        self.map.remove_ptr(self.ptr)
     }
 
     pub fn move_next(&mut self) {
@@ -708,12 +735,20 @@ impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
         self.ptr
     }
 
+    pub fn at_tail(&self) -> bool {
+        self.ptr == self.map.tail
+    }
+
+    pub fn at_head(&self) -> bool {
+        self.ptr == self.map.head
+    }
+
     pub fn current(&self) -> Option<(&K, &T)> {
-        self.map.map.get_index(self.ptr.unchecked_get())
+        self.map.ptr_get_entry(self.ptr)
     }
 
     pub fn current_mut(&mut self) -> Option<(&K, &mut T)> {
-        self.map.map.get_index_mut(self.ptr.unchecked_get())
+        self.map.ptr_get_entry_mut(self.ptr)
     }
 
     pub fn next_ptr(&self) -> Option<Ptr> {
@@ -722,12 +757,12 @@ impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
 
     pub fn next(&self) -> Option<(&K, &T)> {
         let ptr = self.next_ptr()?;
-        self.map.map.get_index(ptr.unchecked_get())
+        self.map.ptr_get_entry(ptr)
     }
 
     pub fn next_mut(&mut self) -> Option<(&K, &mut T)> {
         let ptr = self.next_ptr()?;
-        self.map.map.get_index_mut(ptr.unchecked_get())
+        self.map.ptr_get_entry_mut(ptr)
     }
 
     pub fn prev_ptr(&self) -> Option<Ptr> {
@@ -736,12 +771,12 @@ impl<'m, K: Hash + Eq, T> CursorMut<'m, K, T> {
 
     pub fn prev(&self) -> Option<(&K, &T)> {
         let ptr = self.prev_ptr()?;
-        self.map.map.get_index(ptr.unchecked_get())
+        self.map.ptr_get_entry(ptr)
     }
 
     pub fn prev_mut(&mut self) -> Option<(&K, &mut T)> {
         let ptr = self.prev_ptr()?;
-        self.map.map.get_index_mut(ptr.unchecked_get())
+        self.map.ptr_get_entry_mut(ptr)
     }
 }
 
@@ -749,13 +784,13 @@ impl<K, T> Index<Ptr> for LinkedHashMap<K, T> {
     type Output = T;
 
     fn index(&self, index: Ptr) -> &Self::Output {
-        &self.map[index.unchecked_get()]
+        &self.nodes[index.unchecked_get()].value
     }
 }
 
 impl<K, T> IndexMut<Ptr> for LinkedHashMap<K, T> {
     fn index_mut(&mut self, index: Ptr) -> &mut Self::Output {
-        &mut self.map[index.unchecked_get()]
+        &mut self.nodes[index.unchecked_get()].value
     }
 }
 
@@ -767,96 +802,96 @@ pub enum Entry<'a, K, V> {
 
 #[doc(hidden)]
 pub struct OccupiedEntry<'a, K, V> {
-    entry: map::OccupiedEntry<'a, K, V>,
+    entry: hash_table::OccupiedEntry<'a, Ptr>,
+    node: &'a mut LLNode<K, V>,
 }
 
 impl<K, V> OccupiedEntry<'_, K, V> {
     pub fn get(&self) -> &V {
-        self.entry.get()
+        &self.node.value
     }
 
     pub fn get_mut(&mut self) -> &mut V {
-        self.entry.get_mut()
+        &mut self.node.value
     }
 
-    pub fn insert_no_move(mut self, value: V) -> V {
-        std::mem::replace(self.entry.get_mut(), value)
+    pub fn insert_no_move(self, value: V) -> V {
+        std::mem::replace(&mut self.node.value, value)
     }
 
     pub fn ptr(&self) -> Ptr {
-        Ptr::unchecked_from(self.entry.index())
+        *self.entry.get()
     }
 
     pub fn key(&self) -> &K {
-        self.entry.key()
+        &self.node.key
     }
 }
 
 #[doc(hidden)]
 pub struct VacantEntry<'a, K, V> {
-    entry: map::VacantEntry<'a, K, V>,
-    links: &'a mut Vec<Link>,
+    key: K,
+    hash: u64,
+    entry: hash_table::VacantEntry<'a, Ptr>,
+    nodes: &'a mut Slab<LLNode<K, V>>,
     head: &'a mut Ptr,
     tail: &'a mut Ptr,
 }
 
 impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
-    pub fn entry_ptr_unstable(&self) -> Ptr {
-        Ptr::unchecked_from(self.entry.index())
-    }
-
     pub fn insert_tail(self, value: V) -> Ptr {
         let after = *self.tail;
         self.insert_after(value, after)
     }
 
-    pub fn push_unlinked(self, value: V) {
-        let ptr = Ptr::unchecked_from(self.entry.index());
-        if self.head.is_null() && self.tail.is_null() {
-            *self.head = ptr;
-            *self.tail = ptr;
-        }
-
-        self.entry.insert(value);
-        self.links.push(Link {
+    pub fn push_unlinked(self, value: V) -> Ptr {
+        let ptr = Ptr::unchecked_from(self.nodes.insert(LLNode {
+            key: self.key,
+            value,
+            hash: self.hash,
             prev: Ptr::null(),
             next: Ptr::null(),
-        });
+        }));
+
+        self.entry.insert(ptr);
+        ptr
     }
 
     pub fn insert_after(self, value: V, after: Ptr) -> Ptr {
-        let ptr = Ptr::unchecked_from(self.entry.index());
         if self.head.is_null() && self.tail.is_null() {
-            *self.head = ptr;
-            *self.tail = ptr;
-            self.entry.insert(value);
-            self.links.push(Link {
+            *self.head = Ptr::unchecked_from(self.nodes.insert(LLNode {
+                key: self.key,
+                value,
+                hash: self.hash,
                 prev: Ptr::null(),
                 next: Ptr::null(),
-            });
+            }));
+            self.nodes[self.head.unchecked_get()].next = *self.head;
+            self.nodes[self.head.unchecked_get()].prev = *self.head;
+            self.entry.insert(*self.head);
+            *self.tail = *self.head;
+            *self.head
         } else {
-            let after_next = self
-                .links
-                .get(after.unchecked_get())
-                .map_or(Ptr::null(), |l| l.next);
-            self.entry.insert(value);
-            self.links.push(Link {
+            let after_next = self.nodes[after.unchecked_get()].next;
+            let ptr = Ptr::unchecked_from(self.nodes.vacant_key());
+
+            self.nodes[after.unchecked_get()].next = ptr;
+            self.nodes[after_next.unchecked_get()].prev = ptr;
+            self.entry.insert(ptr);
+
+            self.nodes.insert(LLNode {
+                key: self.key,
+                value,
+                hash: self.hash,
                 prev: after,
                 next: after_next,
             });
 
-            if let Some(p) = self.links.get_mut(after.unchecked_get()) {
-                p.next = ptr;
-            }
-            if let Some(p) = self.links.get_mut(after_next.unchecked_get()) {
-                p.prev = ptr;
-            }
-
             if *self.tail == after {
                 *self.tail = ptr;
             }
+            ptr
         }
-        ptr
     }
 
     pub fn insert_head(self, value: V) -> Ptr {
@@ -865,46 +900,47 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
     }
 
     pub fn insert_before(self, value: V, before: Ptr) -> Ptr {
-        let ptr = Ptr::unchecked_from(self.entry.index());
         if self.head.is_null() && self.tail.is_null() {
-            *self.head = ptr;
-            *self.tail = ptr;
-            self.entry.insert(value);
-            self.links.push(Link {
+            *self.head = Ptr::unchecked_from(self.nodes.insert(LLNode {
+                key: self.key,
+                value,
+                hash: self.hash,
                 prev: Ptr::null(),
                 next: Ptr::null(),
-            });
+            }));
+            self.nodes[self.head.unchecked_get()].next = *self.head;
+            self.nodes[self.head.unchecked_get()].prev = *self.head;
+            self.entry.insert(*self.head);
+            *self.tail = *self.head;
+            *self.head
         } else {
-            let before_prev = self
-                .links
-                .get(before.unchecked_get())
-                .map_or(Ptr::null(), |l| l.prev);
-            self.entry.insert(value);
-            self.links.push(Link {
+            let before_prev = self.nodes[before.unchecked_get()].prev;
+            let ptr = Ptr::unchecked_from(self.nodes.vacant_key());
+            self.nodes[before.unchecked_get()].prev = ptr;
+            self.nodes[before_prev.unchecked_get()].next = ptr;
+            self.entry.insert(ptr);
+
+            self.nodes.insert(LLNode {
+                key: self.key,
+                value,
+                hash: self.hash,
                 prev: before_prev,
                 next: before,
             });
 
-            if let Some(p) = self.links.get_mut(before.unchecked_get()) {
-                p.prev = ptr;
-            }
-            if let Some(p) = self.links.get_mut(before_prev.unchecked_get()) {
-                p.next = ptr;
-            }
-
             if *self.head == before {
                 *self.head = ptr;
             }
+            ptr
         }
-        ptr
     }
 
     pub fn into_key(self) -> K {
-        self.entry.into_key()
+        self.key
     }
 
     pub fn key(&self) -> &K {
-        self.entry.key()
+        &self.key
     }
 }
 
@@ -912,6 +948,7 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
 #[derive(Debug, Clone, Copy)]
 pub struct Iter<'a, K, T> {
     ptr: Ptr,
+    end: Ptr,
     map: &'a LinkedHashMap<K, T>,
 }
 
@@ -921,6 +958,9 @@ impl<'a, K, T> Iterator for Iter<'a, K, T> {
     fn next(&mut self) -> Option<Self::Item> {
         let ptr = self.ptr;
         self.ptr = self.map.next_ptr(ptr).unwrap_or_default();
+        if self.ptr == self.end {
+            self.ptr = Ptr::null();
+        }
         self.map.ptr_get_entry(ptr)
     }
 }
@@ -928,6 +968,7 @@ impl<'a, K, T> Iterator for Iter<'a, K, T> {
 #[doc(hidden)]
 pub struct IterRev<'a, K, T> {
     ptr: Ptr,
+    end: Ptr,
     map: &'a LinkedHashMap<K, T>,
 }
 
@@ -937,15 +978,18 @@ impl<'a, K, T> Iterator for IterRev<'a, K, T> {
     fn next(&mut self) -> Option<Self::Item> {
         let ptr = self.ptr;
         self.ptr = self.map.prev_ptr(ptr).unwrap_or_default();
+        if self.ptr == self.end {
+            self.ptr = Ptr::null();
+        }
         self.map.ptr_get_entry(ptr)
     }
 }
 
 #[doc(hidden)]
 pub struct IntoIter<K, T> {
-    values: Vec<Option<(K, T)>>,
+    nodes: Slab<LLNode<K, T>>,
+    end: Ptr,
     ptr: Ptr,
-    links: Vec<Link>,
 }
 
 impl<K, T> Iterator for IntoIter<K, T> {
@@ -957,16 +1001,22 @@ impl<K, T> Iterator for IntoIter<K, T> {
         }
 
         let ptr = self.ptr;
-        self.ptr = self.links[ptr.unchecked_get()].next;
-        self.values[ptr.unchecked_get()].take()
+        let node = self.nodes.remove(ptr.unchecked_get());
+
+        self.ptr = if node.next == self.end {
+            Ptr::null()
+        } else {
+            node.next
+        };
+        Some((node.key, node.value))
     }
 }
 
 #[doc(hidden)]
 pub struct IntoIterRev<K, T> {
-    values: Vec<Option<(K, T)>>,
     ptr: Ptr,
-    links: Vec<Link>,
+    end: Ptr,
+    nodes: Slab<LLNode<K, T>>,
 }
 
 impl<K, T> Iterator for IntoIterRev<K, T> {
@@ -978,9 +1028,13 @@ impl<K, T> Iterator for IntoIterRev<K, T> {
         }
 
         let ptr = self.ptr;
-
-        self.ptr = self.links[ptr.unchecked_get()].prev;
-        self.values[ptr.unchecked_get()].take()
+        let node = self.nodes.remove(ptr.unchecked_get());
+        self.ptr = if node.prev == self.end {
+            Ptr::null()
+        } else {
+            node.prev
+        };
+        Some((node.key, node.value))
     }
 }
 
@@ -1243,16 +1297,15 @@ mod tests {
         map.insert_tail(2, "two".to_string());
         map.insert_tail(3, "three".to_string());
 
-        let removed: Option<RemovedEntry<i32, String>> = map.swap_remove(&2);
+        let removed = map.remove(&2).unwrap().1;
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 2,
                 value: "two".to_string(),
                 prev: map.get_ptr(&1).unwrap(),
                 next: map.get_ptr(&3).unwrap(),
-                invalidated: Ptr::unchecked_from(2),
-            })
+            }
         );
         assert_eq!(map.len(), 2);
         assert!(!map.contains_key(&2));
@@ -1263,37 +1316,35 @@ mod tests {
             vec![(&1, &"one".to_string()), (&3, &"three".to_string())]
         );
 
-        let removed = map.swap_remove(&1);
+        let removed = map.remove(&1).unwrap().1;
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 1,
                 value: "one".to_string(),
-                prev: Ptr::null(),
+                prev: map.get_ptr(&3).unwrap(),
                 next: map.get_ptr(&3).unwrap(),
-                invalidated: Ptr::unchecked_from(1),
-            })
+            }
         );
         assert_eq!(map.len(), 1);
         assert_eq!(map.head_ptr(), map.tail_ptr());
 
-        let removed = map.swap_remove(&3);
+        let removed = map.remove(&3).unwrap().1;
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 3,
                 value: "three".to_string(),
                 prev: Ptr::null(),
                 next: Ptr::null(),
-                invalidated: Ptr::unchecked_from(0),
-            })
+            }
         );
         assert_eq!(map.len(), 0);
         assert!(map.is_empty());
         assert_eq!(map.head_ptr(), Ptr::null());
         assert_eq!(map.tail_ptr(), Ptr::null());
 
-        let removed = map.swap_remove(&1);
+        let removed = map.remove(&1);
         assert_eq!(removed, None);
     }
 
@@ -1305,7 +1356,7 @@ mod tests {
         map.insert_tail(2, "two".to_string());
         map.insert_tail(3, "three".to_string());
 
-        let removed = map.swap_remove_ptr(map.get_ptr(&2).unwrap());
+        let removed = map.remove_ptr(map.get_ptr(&2).unwrap());
         assert_eq!(
             removed,
             Some(RemovedEntry {
@@ -1313,31 +1364,29 @@ mod tests {
                 value: "two".to_string(),
                 prev: map.get_ptr(&1).unwrap(),
                 next: map.get_ptr(&3).unwrap(),
-                invalidated: Ptr::unchecked_from(2),
             })
         );
         assert_eq!(map.len(), 2);
         assert!(!map.contains_key(&2));
 
-        let removed = map.swap_remove_ptr(map.get_ptr(&1).unwrap());
+        let removed = map.remove_ptr(map.get_ptr(&1).unwrap());
         assert_eq!(
             removed,
             Some(RemovedEntry {
                 key: 1,
                 value: "one".to_string(),
-                prev: Ptr::null(),
+                prev: map.get_ptr(&3).unwrap(),
                 next: map.get_ptr(&3).unwrap(),
-                invalidated: Ptr::unchecked_from(1),
             })
         );
         assert_eq!(map.len(), 1);
         assert_eq!(map.head_ptr(), map.get_ptr(&3).unwrap());
         assert_eq!(map.tail_ptr(), map.get_ptr(&3).unwrap());
 
-        let removed = map.swap_remove_ptr(map.get_ptr(&1).unwrap_or(Ptr::null()));
+        let removed = map.remove_ptr(map.get_ptr(&1).unwrap_or(Ptr::null()));
         assert_eq!(removed, None);
 
-        let removed = map.swap_remove_ptr(map.get_ptr(&3).unwrap());
+        let removed = map.remove_ptr(map.get_ptr(&3).unwrap());
         assert_eq!(
             removed,
             Some(RemovedEntry {
@@ -1345,7 +1394,6 @@ mod tests {
                 value: "three".to_string(),
                 prev: Ptr::null(),
                 next: Ptr::null(),
-                invalidated: Ptr::unchecked_from(0),
             })
         );
         assert!(map.is_empty());
@@ -1360,16 +1408,15 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map.head_ptr(), map.tail_ptr());
 
-        let removed = map.swap_remove(&42);
+        let removed = map.remove(&42).unwrap().1;
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 42,
                 value: "answer".to_string(),
                 prev: Ptr::null(),
                 next: Ptr::null(),
-                invalidated: Ptr::unchecked_from(0),
-            })
+            }
         );
         assert!(map.is_empty());
         assert_eq!(map.head_ptr(), Ptr::null());
@@ -1384,29 +1431,27 @@ mod tests {
             map.insert_tail(i, format!("value{}", i));
         }
 
-        let removed = map.swap_remove(&1);
+        let removed = map.remove(&1).unwrap().1;
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 1,
                 value: "value1".to_string(),
-                prev: Ptr::null(),
+                prev: map.get_ptr(&5).unwrap(),
                 next: map.get_ptr(&2).unwrap(),
-                invalidated: Ptr::unchecked_from(4),
-            })
+            }
         );
         assert_eq!(map.tail_ptr(), map.get_ptr(&5).unwrap());
 
-        let removed = map.swap_remove(&5);
+        let removed = map.remove(&5).unwrap().1;
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 5,
                 value: "value5".to_string(),
                 prev: map.get_ptr(&4).unwrap(),
-                next: Ptr::null(),
-                invalidated: Ptr::unchecked_from(3),
-            })
+                next: map.get_ptr(&2).unwrap(),
+            }
         );
         assert_eq!(map.len(), 3);
 
@@ -1436,7 +1481,7 @@ mod tests {
         assert_eq!(items, vec![3, 1, 2, 4]);
 
         let ptr4 = map.get_ptr(&4).unwrap();
-        map.move_to_head(ptr4);
+        map.move_to_head(ptr4).unwrap();
 
         let items: Vec<_> = map.iter().map(|(k, _)| *k).collect();
         assert_eq!(items, vec![4, 3, 1, 2]);
@@ -1562,10 +1607,10 @@ mod tests {
 
         assert_eq!(map.next_ptr(ptr1), Some(ptr2));
         assert_eq!(map.next_ptr(ptr2), Some(ptr3));
-        assert_eq!(map.next_ptr(ptr3), None);
+        assert_eq!(map.next_ptr(ptr3), Some(ptr1));
         assert_eq!(map.next_ptr(Ptr::null()), None);
 
-        assert_eq!(map.prev_ptr(ptr1), None);
+        assert_eq!(map.prev_ptr(ptr1), Some(ptr3));
         assert_eq!(map.prev_ptr(ptr2), Some(ptr1));
         assert_eq!(map.prev_ptr(ptr3), Some(ptr2));
         assert_eq!(map.prev_ptr(Ptr::null()), None);
@@ -1720,7 +1765,7 @@ mod tests {
             map.insert_tail(i, format!("value{}", i));
         }
 
-        map.swap_remove(&3);
+        map.remove(&3);
 
         let items: Vec<_> = map.iter().map(|(k, _)| *k).collect();
         assert_eq!(items, vec![1, 2, 4, 5]);
@@ -1998,7 +2043,6 @@ mod tests {
                 value: "value4".to_string(),
                 prev: cursor.get_ptr(&3).unwrap(),
                 next: cursor.get_ptr(&5).unwrap(),
-                invalidated: Ptr::unchecked_from(4),
             })
         );
 
@@ -2010,7 +2054,6 @@ mod tests {
                 value: "value2".to_string(),
                 prev: cursor.get_ptr(&1).unwrap(),
                 next: cursor.get_ptr(&3).unwrap(),
-                invalidated: Ptr::unchecked_from(3),
             })
         );
 
@@ -2022,7 +2065,6 @@ mod tests {
                 value: "value3".to_string(),
                 prev: map.get_ptr(&1).unwrap(),
                 next: map.get_ptr(&5).unwrap(),
-                invalidated: Ptr::unchecked_from(2),
             })
         );
         assert!(!map.contains_key(&3));
@@ -2045,9 +2087,8 @@ mod tests {
             Some(RemovedEntry {
                 key: 1,
                 value: "one".to_string(),
-                prev: Ptr::null(),
+                prev: map.get_ptr(&2).unwrap(),
                 next: map.get_ptr(&2).unwrap(),
-                invalidated: Ptr::unchecked_from(1),
             })
         );
 
@@ -2087,7 +2128,7 @@ mod tests {
         assert_eq!(map.ptr_get_entry_mut(invalid_ptr), None);
         assert_eq!(map.ptr_get_mut(invalid_ptr), None);
         assert_eq!(map.key_for_ptr(invalid_ptr), None);
-        assert_eq!(map.swap_remove_ptr(invalid_ptr), None);
+        assert_eq!(map.remove_ptr(invalid_ptr), None);
         assert!(!map.contains_ptr(invalid_ptr));
 
         map.move_to_head(invalid_ptr);
@@ -2126,7 +2167,7 @@ mod tests {
         assert_eq!(items.len(), SIZE);
 
         for i in (0..SIZE).step_by(2) {
-            map.swap_remove(&i);
+            map.remove(&i);
         }
 
         assert_eq!(map.len(), SIZE / 2);
@@ -2173,7 +2214,7 @@ mod tests {
             map.insert_tail(i, i * 10);
         }
 
-        map.swap_remove(&3);
+        map.remove(&3);
         if let Some(ptr) = map.get_ptr(&1) {
             map.move_to_tail(ptr);
         }
@@ -2235,7 +2276,7 @@ mod tests {
             map.debug_validate();
         }
 
-        map.swap_remove(&2);
+        map.remove(&2);
         map.debug_validate();
 
         map.clear();
@@ -2285,7 +2326,7 @@ mod tests {
         }
 
         map.insert_head(0, 0);
-        map.swap_remove(&3);
+        map.remove(&3);
         if let Some(ptr) = map.get_ptr(&4) {
             map.move_to_head(ptr);
         }
@@ -2303,16 +2344,20 @@ mod tests {
 
         let mut forward_ptrs = Vec::new();
         let mut current_ptr = map.head_ptr();
-        while current_ptr != Ptr::null() {
+        let mut looped = false;
+        while !looped {
             forward_ptrs.push(current_ptr);
             current_ptr = map.next_ptr(current_ptr).unwrap_or(Ptr::null());
+            looped = current_ptr == map.head_ptr();
         }
 
         let mut backward_ptrs = Vec::new();
         let mut current_ptr = map.tail_ptr();
-        while current_ptr != Ptr::null() {
+        let mut looped = false;
+        while !looped {
             backward_ptrs.push(current_ptr);
             current_ptr = map.prev_ptr(current_ptr).unwrap_or(Ptr::null());
+            looped = current_ptr == map.tail_ptr();
         }
 
         backward_ptrs.reverse();

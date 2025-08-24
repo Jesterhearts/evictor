@@ -104,11 +104,10 @@ macro_rules! impl_queue_policy {
                             InsertOrUpdateAction::InsertOrUpdate(value) => value,
                         };
                         let ptr = if make_room_on_insert {
-                            vacant_entry.push_unlinked($entry_name::new(value));
-                            let evicted_slash_replaced = metadata.candidate_removal_index(queue);
-                            queue.swap_remove_ptr(evicted_slash_replaced);
-                            $link!(queue, evicted_slash_replaced);
-                            evicted_slash_replaced
+                            let ptr = vacant_entry.push_unlinked($entry_name::new(value));
+                            Self::evict_entry(metadata, queue);
+                            $link!(queue, ptr);
+                            ptr
                         } else {
                             $insert!(vacant_entry, $entry_name::new(value))
                         };
@@ -131,11 +130,19 @@ macro_rules! impl_queue_policy {
             ) -> (Ptr, Option<(K, $entry_name<T>)>) {
                 let Some(RemovedEntry {
                     key, value, next, ..
-                }) = queue.swap_remove_ptr(ptr)
+                }) = queue.remove_ptr(ptr)
                 else {
                     return (Ptr::null(), None);
                 };
                 (next, Some((key, value)))
+            }
+
+            fn remove_key<K: std::hash::Hash + Eq>(
+                key: &K,
+                _: &mut Self::MetadataType,
+                queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+            ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
+                queue.remove(key).map(|removed| removed.1.value)
             }
 
             fn iter<'q, K>(

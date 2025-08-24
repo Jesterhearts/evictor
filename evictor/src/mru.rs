@@ -103,11 +103,10 @@ impl<T> Policy<T> for MruPolicy {
                 };
 
                 let ptr = if make_room_on_insert {
-                    vacant_entry.push_unlinked(MruEntry::new(value));
-                    let evicted_slash_replaced = metadata.candidate_removal_index(queue);
-                    queue.swap_remove_ptr(evicted_slash_replaced);
-                    queue.link_as_head(evicted_slash_replaced);
-                    evicted_slash_replaced
+                    let ptr = vacant_entry.push_unlinked(MruEntry::new(value));
+                    Self::evict_entry(metadata, queue);
+                    queue.link_as_head(ptr);
+                    ptr
                 } else {
                     vacant_entry.insert_head(MruEntry::new(value))
                 };
@@ -135,11 +134,19 @@ impl<T> Policy<T> for MruPolicy {
     ) {
         let Some(RemovedEntry {
             key, value, next, ..
-        }) = queue.swap_remove_ptr(ptr)
+        }) = queue.remove_ptr(ptr)
         else {
             return (Ptr::null(), None);
         };
         (next, Some((key, value)))
+    }
+
+    fn remove_key<K: std::hash::Hash + Eq>(
+        key: &K,
+        _: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
+        queue.remove(key).map(|removed| removed.1.value)
     }
 
     fn iter<'q, K>(
