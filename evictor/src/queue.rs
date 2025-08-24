@@ -1,14 +1,18 @@
 macro_rules! impl_queue_policy {
-    (($policy_name:ident, $entry_name:ident, $metadata_name:ident) => $link:ident ) => {
+    (($policy_name:ident, $entry_name:ident, $metadata_name:ident) => $insert:ident, $link:ident ) => {
         use crate::{
             EntryValue,
+            InsertOrUpdateAction,
+            InsertionResult,
             Metadata,
             Policy,
-            private,
-            utils::{
-                impl_ll_iters,
-                swap_remove_ll_entry,
+            linked_hashmap::{
+                self,
+                LinkedHashMap,
+                Ptr,
+                RemovedEntry,
             },
+            private,
         };
 
         #[derive(Debug, Clone, Copy)]
@@ -21,19 +25,13 @@ macro_rules! impl_queue_policy {
         #[doc(hidden)]
         pub struct $entry_name<Value> {
             value: Value,
-            next: Option<usize>,
-            prev: Option<usize>,
         }
 
         impl<Value> private::Sealed for $entry_name<Value> {}
 
         impl<Value> EntryValue<Value> for $entry_name<Value> {
             fn new(value: Value) -> Self {
-                $entry_name {
-                    value,
-                    next: None,
-                    prev: None,
-                }
+                $entry_name { value }
             }
 
             fn into_value(self) -> Value {
@@ -51,21 +49,15 @@ macro_rules! impl_queue_policy {
 
         #[derive(Debug, Clone, Copy, Default)]
         #[doc(hidden)]
-        pub struct $metadata_name {
-            tail: usize,
-            head: usize,
-        }
+        pub struct $metadata_name;
 
         impl private::Sealed for $metadata_name {}
 
         impl<T> Metadata<T> for $metadata_name {
             type EntryType = $entry_name<T>;
 
-            fn candidate_removal_index<K>(
-                &self,
-                _: &indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
-            ) -> usize {
-                self.head
+            fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, $entry_name<T>>) -> Ptr {
+                queue.head_ptr()
             }
         }
 
@@ -73,130 +65,166 @@ macro_rules! impl_queue_policy {
             type IntoIter<K> = IntoIter<K, T>;
             type MetadataType = $metadata_name;
 
-            fn touch_entry<K>(
-                mut index: usize,
-                make_room: bool,
+            fn insert_or_update_entry<K: std::hash::Hash + Eq>(
+                key: K,
+                make_room_on_insert: bool,
+                get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
                 metadata: &mut Self::MetadataType,
-                queue: &mut indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
-            ) -> usize {
-                if index >= queue.len() {
-                    return index;
-                }
-
-                let removal_index = metadata.candidate_removal_index(queue);
-                #[cfg(debug_assertions)]
-                if make_room {
-                    assert_ne!(removal_index, index);
-                }
-
-                // In queues, touching an entry does not change its position, but we still need
-                // to link it into the list if it has no links.
-                if queue[index].next.is_none() && queue[index].prev.is_none() {
-                    $link!(metadata, index, queue);
-                }
-
-                if make_room {
-                    if index == queue.len() - 1 {
-                        index = removal_index;
+                queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+            ) -> InsertionResult<K, T> {
+                match queue.entry(key) {
+                    linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+                        let ptr = occupied_entry.ptr();
+                        match get_value(occupied_entry.key(), false) {
+                            InsertOrUpdateAction::NoInsert(_) => {
+                                unreachable!("Cache hit should not return NoInsert");
+                            }
+                            InsertOrUpdateAction::TouchNoUpdate => {
+                                Self::touch_entry(ptr, metadata, queue);
+                                InsertionResult::FoundTouchedNoUpdate(ptr)
+                            }
+                            InsertOrUpdateAction::InsertOrUpdate(value) => {
+                                occupied_entry.get_mut().value = value;
+                                Self::touch_entry(ptr, metadata, queue);
+                                InsertionResult::Updated(ptr)
+                            }
+                        }
                     }
-                    Self::swap_remove_entry(removal_index, metadata, queue);
+                    linked_hashmap::Entry::Vacant(vacant_entry) => {
+                        let value = match get_value(vacant_entry.key(), true) {
+                            InsertOrUpdateAction::NoInsert(value) => {
+                                return InsertionResult::NotFoundNoInsert(
+                                    vacant_entry.into_key(),
+                                    value,
+                                );
+                            }
+                            InsertOrUpdateAction::TouchNoUpdate => {
+                                unreachable!("Cache miss should not return TouchNoUpdate");
+                            }
+                            InsertOrUpdateAction::InsertOrUpdate(value) => value,
+                        };
+                        let ptr = if make_room_on_insert {
+                            vacant_entry.push_unlinked($entry_name::new(value));
+                            let evicted_slash_replaced = metadata.candidate_removal_index(queue);
+                            queue.swap_remove_ptr(evicted_slash_replaced);
+                            $link!(queue, evicted_slash_replaced);
+                            evicted_slash_replaced
+                        } else {
+                            $insert!(vacant_entry, $entry_name::new(value))
+                        };
+                        InsertionResult::Inserted(ptr)
+                    }
                 }
-
-                index
             }
 
-            fn swap_remove_entry<K>(
-                index: usize,
-                metadata: &mut Self::MetadataType,
-                queue: &mut indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
-            ) -> Option<(K, $entry_name<T>)> {
-                swap_remove_ll_entry!(index, metadata, queue)
+            fn touch_entry<K: std::hash::Hash + Eq>(
+                _: Ptr,
+                _: &mut Self::MetadataType,
+                _: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+            ) {
+            }
+
+            fn remove_entry<K: std::hash::Hash + Eq>(
+                ptr: Ptr,
+                _: &mut Self::MetadataType,
+                queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+            ) -> (Ptr, Option<(K, $entry_name<T>)>) {
+                let Some(RemovedEntry {
+                    key, value, next, ..
+                }) = queue.swap_remove_ptr(ptr)
+                else {
+                    return (Ptr::null(), None);
+                };
+                (next, Some((key, value)))
             }
 
             fn iter<'q, K>(
-                metadata: &'q Self::MetadataType,
-                queue: &'q indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+                _: &'q Self::MetadataType,
+                queue: &'q LinkedHashMap<K, $entry_name<T>>,
             ) -> impl Iterator<Item = (&'q K, &'q T)>
             where
                 T: 'q,
             {
-                Iter {
-                    queue,
-                    index: Some(metadata.head),
-                }
+                queue.iter().map(move |(k, v)| (k, v.value()))
             }
 
             fn into_iter<K>(
-                metadata: Self::MetadataType,
-                queue: indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+                _: Self::MetadataType,
+                queue: LinkedHashMap<K, $entry_name<T>>,
             ) -> Self::IntoIter<K> {
                 IntoIter {
-                    queue: queue.into_iter().map(Some).collect(),
-                    index: Some(metadata.head),
+                    inner: queue.into_iter(),
                 }
             }
 
             fn into_entries<K>(
-                metadata: Self::MetadataType,
-                queue: indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+                _: Self::MetadataType,
+                queue: LinkedHashMap<K, $entry_name<T>>,
             ) -> impl Iterator<Item = (K, $entry_name<T>)> {
-                IntoEntriesIter {
-                    queue: queue.into_iter().map(Some).collect(),
-                    index: Some(metadata.head),
-                }
+                queue.into_iter()
             }
 
             #[cfg(all(debug_assertions, feature = "internal-debugging"))]
             fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
-                metadata: &Self::MetadataType,
-                queue: &indexmap::IndexMap<K, $entry_name<T>, crate::RandomState>,
+                _: &Self::MetadataType,
+                queue: &LinkedHashMap<K, $entry_name<T>>,
             ) where
                 T: std::fmt::Debug,
             {
-                use crate::utils::validate_ll;
-                validate_ll!(metadata, queue);
+                queue.debug_validate();
             }
         }
 
-        impl_ll_iters!($entry_name);
+        #[doc(hidden)]
+        pub struct IntoIter<K, T> {
+            inner: linked_hashmap::IntoIter<K, $entry_name<T>>,
+        }
+
+        impl<K, T> Iterator for IntoIter<K, T> {
+            type Item = (K, T);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.inner.next().map(|(k, v)| (k, v.into_value()))
+            }
+        }
     };
 }
 
 pub(crate) mod fifo {
-    macro_rules! link_as_tail {
-        ($metadata:ident, $index:ident, $queue:ident) => {
-            if $metadata.tail == $index {
-                return $index;
-            }
+    macro_rules! insert_as_tail {
+        ($entry:expr, $value:expr) => {
+            $entry.insert_tail($value)
+        };
+    }
 
-            $queue[$index].prev = Some($metadata.tail);
-            $queue[$metadata.tail].next = Some($index);
-            $metadata.tail = $index;
+    macro_rules! link_as_tail {
+        ($queue:expr, $ptr:expr) => {
+            $queue.link_as_tail($ptr)
         };
     }
 
     impl_queue_policy!(
-        (FifoPolicy, FifoEntry, FifoMetadata) =>  link_as_tail
+        (FifoPolicy, FifoEntry, FifoMetadata) =>  insert_as_tail, link_as_tail
     );
 }
 
 pub use fifo::FifoPolicy;
 
 pub(crate) mod lifo {
-    macro_rules! link_as_head {
-        ($metadata:ident, $index:ident, $queue:ident) => {
-            if $metadata.head == $index {
-                return $index;
-            }
+    macro_rules! insert_as_head {
+        ($entry:expr, $value:expr) => {
+            $entry.insert_head($value)
+        };
+    }
 
-            $queue[$index].next = Some($metadata.head);
-            $queue[$metadata.head].prev = Some($index);
-            $metadata.head = $index;
+    macro_rules! link_as_head {
+        ($queue:expr, $ptr:expr) => {
+            $queue.link_as_head($ptr)
         };
     }
 
     impl_queue_policy!(
-        (LifoPolicy, LifoEntry, LifoMetadata) => link_as_head
+        (LifoPolicy, LifoEntry, LifoMetadata) => insert_as_head, link_as_head
     );
 }
 
@@ -206,12 +234,15 @@ pub use lifo::LifoPolicy;
 mod tests {
     use std::num::NonZeroUsize;
 
+    use ntest::timeout;
+
     use crate::{
         Fifo,
         Lifo,
     };
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_trivial() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert("a", 1);
@@ -230,6 +261,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_eviction_order() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -246,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_access_does_not_update_order() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -264,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_update_existing_key() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -280,6 +314,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_single_capacity() {
         let mut fifo = Fifo::new(NonZeroUsize::new(1).unwrap());
 
@@ -297,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_get_or_insert_with_eviction() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -312,6 +348,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_get_or_insert_existing_key() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -331,6 +368,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_empty_cache() {
         let mut fifo = Fifo::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -346,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_capacity_constraints() {
         let fifo = Fifo::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(fifo.capacity(), 5);
@@ -358,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_remove() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert(1, 10);
@@ -390,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_pop() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert(1, 10);
@@ -417,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_tail() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -436,6 +478,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_clear() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert(1, 10);
@@ -456,6 +499,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_mutable_access() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
         fifo.insert(1, String::from("hello"));
@@ -476,6 +520,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_insert_mut() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -491,6 +536,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_get_or_insert_with_mut() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
         fifo.insert(1, String::from("existing"));
@@ -507,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_extend() {
         let mut fifo = Fifo::new(NonZeroUsize::new(5).unwrap());
         fifo.insert(1, 10);
@@ -523,6 +570,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let fifo: Fifo<i32, i32> = items.into_iter().collect();
@@ -537,6 +585,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_shrink_to_fit() {
         let mut fifo = Fifo::new(NonZeroUsize::new(10).unwrap());
         fifo.insert(1, 10);
@@ -550,6 +599,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_retain_basic() {
         let mut fifo = Fifo::new(NonZeroUsize::new(5).unwrap());
 
@@ -570,6 +620,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_peek_mut_no_modification() {
         let mut cache = Fifo::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -587,6 +638,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_trivial() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert("a", 1);
@@ -605,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_eviction_order() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -621,6 +674,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_access_does_not_update_order() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -639,6 +693,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_update_existing_key() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -655,6 +710,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_single_capacity() {
         let mut lifo = Lifo::new(NonZeroUsize::new(1).unwrap());
 
@@ -672,6 +728,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_get_or_insert_with_eviction() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -687,6 +744,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_get_or_insert_existing_key() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -706,6 +764,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_empty_cache() {
         let mut lifo = Lifo::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -721,6 +780,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_capacity_constraints() {
         let lifo = Lifo::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(lifo.capacity(), 5);
@@ -733,6 +793,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_remove() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert(1, 10);
@@ -765,6 +826,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_pop() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert(1, 10);
@@ -792,6 +854,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_tail() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -811,6 +874,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_clear() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert(1, 10);
@@ -831,6 +895,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_mutable_access() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
         lifo.insert(1, String::from("hello"));
@@ -854,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_insert_mut() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -869,6 +935,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_get_or_insert_with_mut() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
         lifo.insert(1, String::from("existing"));
@@ -885,6 +952,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_extend() {
         let mut lifo = Lifo::new(NonZeroUsize::new(5).unwrap());
         lifo.insert(1, 10);
@@ -901,6 +969,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let lifo: Lifo<i32, i32> = items.into_iter().collect();
@@ -915,6 +984,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_shrink_to_fit() {
         let mut lifo = Lifo::new(NonZeroUsize::new(10).unwrap());
         lifo.insert(1, 10);
@@ -928,6 +998,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_retain_basic() {
         let mut lifo = Lifo::new(NonZeroUsize::new(5).unwrap());
 
@@ -948,6 +1019,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_peek_mut_no_modification() {
         let mut cache = Lifo::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);

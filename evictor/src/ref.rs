@@ -1,12 +1,16 @@
-use std::ops::{
-    Deref,
-    DerefMut,
+use std::{
+    hash::Hash,
+    ops::{
+        Deref,
+        DerefMut,
+    },
 };
 
 use crate::{
     Cache,
     EntryValue,
     Policy,
+    linked_hashmap::Ptr,
 };
 
 /// A smart reference to a cached value that tracks modifications.
@@ -116,21 +120,17 @@ use crate::{
 ///     entry.as_mut().push('?'); // Triggers modification tracking
 /// }
 /// ```
-pub struct Entry<'c, K, V, P: Policy<V>> {
-    index: usize,
+pub struct Entry<'c, K: Hash + Eq, V, P: Policy<V>> {
+    key: &'c K,
+    ptr: Ptr,
     dirty: bool,
     cache: &'c mut Cache<K, V, P>,
 }
 
-impl<K, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
+impl<K: Hash + Eq, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
     fn drop(&mut self) {
         if self.dirty {
-            P::touch_entry(
-                self.index,
-                false,
-                &mut self.cache.metadata,
-                &mut self.cache.queue,
-            );
+            P::touch_entry(self.ptr, &mut self.cache.metadata, &mut self.cache.queue);
 
             #[cfg(feature = "statistics")]
             {
@@ -140,45 +140,46 @@ impl<K, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
     }
 }
 
-impl<K, V, P: Policy<V>> AsRef<V> for Entry<'_, K, V, P> {
+impl<K: Hash + Eq, V, P: Policy<V>> AsRef<V> for Entry<'_, K, V, P> {
     fn as_ref(&self) -> &V {
-        self.cache.queue[self.index].value()
+        self.cache.queue[self.ptr].value()
     }
 }
 
-impl<K, V, P: Policy<V>> AsMut<V> for Entry<'_, K, V, P> {
+impl<K: Hash + Eq, V, P: Policy<V>> AsMut<V> for Entry<'_, K, V, P> {
     fn as_mut(&mut self) -> &mut V {
         self.dirty = true;
-        self.cache.queue[self.index].value_mut()
+        self.cache.queue[self.ptr].value_mut()
     }
 }
 
-impl<K, V, P: Policy<V>> Deref for Entry<'_, K, V, P> {
+impl<K: Hash + Eq, V, P: Policy<V>> Deref for Entry<'_, K, V, P> {
     type Target = V;
 
     fn deref(&self) -> &Self::Target {
-        self.cache.queue[self.index].value()
+        self.cache.queue[self.ptr].value()
     }
 }
 
-impl<K, V, P: Policy<V>> DerefMut for Entry<'_, K, V, P> {
+impl<K: Hash + Eq, V, P: Policy<V>> DerefMut for Entry<'_, K, V, P> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.dirty = true;
-        self.cache.queue[self.index].value_mut()
+        self.cache.queue[self.ptr].value_mut()
     }
 }
 
-impl<'q, K, V, P: Policy<V>> Entry<'q, K, V, P> {
-    pub(crate) fn new(index: usize, cache: &'q mut Cache<K, V, P>) -> Self {
+impl<'q, K: Hash + Eq, V, P: Policy<V>> Entry<'q, K, V, P> {
+    pub(crate) fn new(ptr: Ptr, key: &'q K, cache: &'q mut Cache<K, V, P>) -> Self {
         Self {
-            index,
+            key,
+            ptr,
             dirty: false,
             cache,
         }
     }
 }
 
-impl<K, V, P: Policy<V>> Entry<'_, K, V, P> {
+impl<K: Hash + Eq, V, P: Policy<V>> Entry<'_, K, V, P> {
     /// Returns a reference to the key for this cache entry.
     ///
     /// This method provides read-only access to the key associated with the
@@ -206,11 +207,7 @@ impl<K, V, P: Policy<V>> Entry<'_, K, V, P> {
     /// }
     /// ```
     pub fn key(&self) -> &K {
-        self.cache
-            .queue
-            .get_index(self.index)
-            .expect("Entry index out of bounds")
-            .0
+        self.key
     }
 
     /// Returns an immutable reference to the cached value.
@@ -249,7 +246,7 @@ impl<K, V, P: Policy<V>> Entry<'_, K, V, P> {
     ///
     /// [`value_mut()`]: Entry::value_mut
     pub fn value(&self) -> &V {
-        self.cache.queue[self.index].value()
+        self.cache.queue[self.ptr].value()
     }
 
     /// Returns a mutable reference to the cached value and marks the entry as
@@ -330,6 +327,6 @@ impl<K, V, P: Policy<V>> Entry<'_, K, V, P> {
     /// [`value()`]: Entry::value
     pub fn value_mut(&mut self) -> &mut V {
         self.dirty = true;
-        self.cache.queue[self.index].value_mut()
+        self.cache.queue[self.ptr].value_mut()
     }
 }

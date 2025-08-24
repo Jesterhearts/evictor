@@ -1,15 +1,16 @@
-use indexmap::IndexMap;
-
 use crate::{
     EntryValue,
+    InsertOrUpdateAction,
+    InsertionResult,
     Metadata,
     Policy,
-    RandomState,
-    private,
-    utils::{
-        impl_ll_iters,
-        swap_remove_ll_entry,
+    linked_hashmap::{
+        self,
+        LinkedHashMap,
+        Ptr,
+        RemovedEntry,
     },
+    private,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -22,19 +23,13 @@ impl private::Sealed for LruPolicy {}
 #[doc(hidden)]
 pub struct LruEntry<T> {
     value: T,
-    next: Option<usize>,
-    prev: Option<usize>,
 }
 
 impl<T> private::Sealed for LruEntry<T> {}
 
 impl<T> EntryValue<T> for LruEntry<T> {
     fn new(value: T) -> Self {
-        Self {
-            value,
-            next: None,
-            prev: None,
-        }
+        Self { value }
     }
 
     fn into_value(self) -> T {
@@ -52,18 +47,15 @@ impl<T> EntryValue<T> for LruEntry<T> {
 
 #[derive(Debug, Clone, Copy, Default)]
 #[doc(hidden)]
-pub struct LruMetadata {
-    tail: usize,
-    head: usize,
-}
+pub struct LruMetadata;
 
 impl private::Sealed for LruMetadata {}
 
 impl<T> Metadata<T> for LruMetadata {
     type EntryType = LruEntry<T>;
 
-    fn candidate_removal_index<K>(&self, _: &IndexMap<K, LruEntry<T>, RandomState>) -> usize {
-        self.head
+    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, LruEntry<T>>) -> Ptr {
+        queue.head_ptr()
     }
 }
 
@@ -71,126 +63,133 @@ impl<T> Policy<T> for LruPolicy {
     type IntoIter<K> = IntoIter<K, T>;
     type MetadataType = LruMetadata;
 
-    fn touch_entry<K>(
-        mut index: usize,
-        make_room: bool,
+    fn insert_or_update_entry<K: std::hash::Hash + Eq>(
+        key: K,
+        make_room_on_insert: bool,
+        get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, LruEntry<T>, RandomState>,
-    ) -> usize {
-        if index >= queue.len() {
-            return index;
-        }
-
-        let removal_index = metadata.candidate_removal_index(queue);
-        #[cfg(debug_assertions)]
-        if make_room {
-            assert_ne!(removal_index, index);
-        }
-
-        let old_head = metadata.tail;
-        if old_head == index {
-            if make_room {
-                if index == queue.len() - 1 {
-                    index = removal_index;
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> InsertionResult<K, T> {
+        match queue.entry(key) {
+            linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+                let ptr = occupied_entry.ptr();
+                match get_value(occupied_entry.key(), false) {
+                    InsertOrUpdateAction::TouchNoUpdate => {
+                        Self::touch_entry(ptr, metadata, queue);
+                        InsertionResult::FoundTouchedNoUpdate(ptr)
+                    }
+                    InsertOrUpdateAction::InsertOrUpdate(value) => {
+                        *occupied_entry.get_mut() = LruEntry::new(value);
+                        Self::touch_entry(ptr, metadata, queue);
+                        InsertionResult::Updated(ptr)
+                    }
+                    InsertOrUpdateAction::NoInsert(_) => {
+                        unreachable!("Cache hit should not return NoInsert");
+                    }
                 }
-                Self::evict_entry(metadata, queue);
             }
-            return index;
-        }
-
-        metadata.tail = index;
-        let old_prev = queue[index].prev;
-        let old_next = queue[index].next;
-        queue[index].next = None;
-        queue[index].prev = Some(old_head);
-
-        if metadata.head == index {
-            metadata.head = old_next.unwrap_or_default();
-        }
-
-        queue[old_head].next = Some(index);
-
-        if let Some(prev) = old_prev {
-            queue[prev].next = old_next;
-        }
-
-        if let Some(next) = old_next {
-            queue[next].prev = old_prev;
-        }
-
-        if make_room {
-            if index == queue.len() - 1 {
-                index = removal_index;
+            linked_hashmap::Entry::Vacant(vacant_entry) => {
+                match get_value(vacant_entry.key(), true) {
+                    InsertOrUpdateAction::NoInsert(value) => {
+                        InsertionResult::NotFoundNoInsert(vacant_entry.into_key(), value)
+                    }
+                    InsertOrUpdateAction::TouchNoUpdate => {
+                        unreachable!("Cache miss should not return TouchNoUpdate");
+                    }
+                    InsertOrUpdateAction::InsertOrUpdate(value) => {
+                        vacant_entry.insert_tail(LruEntry::new(value));
+                        if make_room_on_insert {
+                            Self::evict_entry(metadata, queue);
+                        }
+                        InsertionResult::Inserted(queue.tail_ptr())
+                    }
+                }
             }
-            Self::swap_remove_entry(removal_index, metadata, queue);
         }
-
-        index
     }
 
-    fn swap_remove_entry<K>(
-        index: usize,
-        metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, LruEntry<T>, RandomState>,
-    ) -> Option<(K, LruEntry<T>)> {
-        swap_remove_ll_entry!(index, metadata, queue)
+    fn touch_entry<K: std::hash::Hash + Eq>(
+        ptr: Ptr,
+        _: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) {
+        queue.move_to_tail(ptr);
+    }
+
+    fn remove_entry<K: std::hash::Hash + Eq>(
+        ptr: Ptr,
+        _: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> (
+        Ptr,
+        Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
+    ) {
+        let Some(RemovedEntry {
+            key, value, next, ..
+        }) = queue.swap_remove_ptr(ptr)
+        else {
+            return (Ptr::null(), None);
+        };
+        (next, Some((key, value)))
     }
 
     fn iter<'q, K>(
-        metadata: &'q Self::MetadataType,
-        queue: &'q IndexMap<K, LruEntry<T>, RandomState>,
+        _: &'q Self::MetadataType,
+        queue: &'q LinkedHashMap<K, LruEntry<T>>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
     {
-        Iter {
-            queue,
-            index: Some(metadata.head),
-        }
+        queue.iter().map(|(k, v)| (k, v.value()))
     }
 
-    fn into_iter<K>(
-        metadata: Self::MetadataType,
-        queue: IndexMap<K, LruEntry<T>, RandomState>,
-    ) -> IntoIter<K, T> {
+    fn into_iter<K>(_: Self::MetadataType, queue: LinkedHashMap<K, LruEntry<T>>) -> IntoIter<K, T> {
         IntoIter {
-            queue: queue.into_iter().map(Some).collect(),
-            index: Some(metadata.head),
+            inner: queue.into_iter(),
         }
     }
 
     fn into_entries<K>(
-        metadata: Self::MetadataType,
-        queue: IndexMap<K, LruEntry<T>, RandomState>,
+        _: Self::MetadataType,
+        queue: LinkedHashMap<K, LruEntry<T>>,
     ) -> impl Iterator<Item = (K, LruEntry<T>)> {
-        IntoEntriesIter {
-            queue: queue.into_iter().map(Some).collect(),
-            index: Some(metadata.head),
-        }
+        queue.into_iter()
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
     fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
-        metadata: &Self::MetadataType,
-        queue: &IndexMap<K, LruEntry<T>, RandomState>,
+        _: &Self::MetadataType,
+        queue: &LinkedHashMap<K, LruEntry<T>>,
     ) where
         T: std::fmt::Debug,
     {
-        use crate::utils::validate_ll;
-
-        validate_ll!(metadata, queue);
+        queue.debug_validate();
     }
 }
 
-impl_ll_iters!(LruEntry);
+#[doc(hidden)]
+pub struct IntoIter<K, T> {
+    inner: linked_hashmap::IntoIter<K, LruEntry<T>>,
+}
+
+impl<K, T> Iterator for IntoIter<K, T> {
+    type Item = (K, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(k, v)| (k, v.into_value()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
 
+    use ntest::timeout;
+
     use crate::Lru;
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_trivial() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert("a", 1);
@@ -209,6 +208,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_trivial_get_or_insert() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert("a", 1);
@@ -222,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_eviction_order() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -238,6 +239,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_access_updates_order() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -256,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_multiple_accesses() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -272,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_update_existing_key() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -288,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_single_capacity() {
         let mut lru = Lru::new(NonZeroUsize::new(1).unwrap());
 
@@ -305,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_complex_access_pattern() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -326,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_interleaved_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -343,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_get_or_insert_with_eviction() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -358,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_get_or_insert_existing_key() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -377,6 +386,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_sequential_pattern() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -391,6 +401,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_repeated_access_single_key() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -407,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_empty_cache() {
         let mut lru = Lru::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -422,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_capacity_constraints() {
         let lru = Lru::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(lru.capacity(), 5);
@@ -434,6 +447,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_no_side_effects() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -451,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_contains_key() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -470,6 +485,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_remove() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -495,6 +511,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_pop() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -523,6 +540,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_tail() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -542,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_clear() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -562,6 +581,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_mutable_access() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
         lru.insert(1, String::from("hello"));
@@ -585,6 +605,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_insert_mut() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -600,6 +621,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_get_or_insert_with_mut() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
         lru.insert(1, String::from("existing"));
@@ -616,6 +638,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_extend() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
         lru.insert(1, 10);
@@ -632,6 +655,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let lru: Lru<i32, i32> = items.into_iter().collect();
@@ -646,6 +670,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_from_iterator_with_eviction() {
         let items = vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)];
         let lru: Lru<i32, i32> = items.into_iter().collect();
@@ -660,6 +685,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_shrink_to_fit() {
         let mut lru = Lru::new(NonZeroUsize::new(10).unwrap());
         lru.insert(1, 10);
@@ -673,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_entry_lifetime_and_ordering() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -695,6 +722,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_stress_random_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(10).unwrap());
 
@@ -720,6 +748,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_boundary_conditions() {
         let mut lru = Lru::new(NonZeroUsize::new(1000).unwrap());
         for i in 0..500 {
@@ -739,6 +768,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_consistent_state_after_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -763,6 +793,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_key_value_types() {
         let mut lru_str = Lru::new(NonZeroUsize::new(2).unwrap());
         lru_str.insert("key1", 1);
@@ -776,6 +807,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_from_iterator_overlapping_keys() {
         let items = vec![
             (1, "first"),
@@ -799,6 +831,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_from_iterator_overlapping_with_eviction() {
         let items = vec![
             (1, "one"),
@@ -829,6 +862,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_from_iterator_many_duplicates() {
         let items = vec![
             (1, 100),
@@ -852,6 +886,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_basic() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -872,6 +907,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_with_recency_considerations() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -893,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_all() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -911,6 +948,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_none() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -927,6 +965,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_empty_cache() {
         let mut lru = Lru::<i32, &str>::new(NonZeroUsize::new(3).unwrap());
 
@@ -937,6 +976,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_single_item() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -954,6 +994,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_recency_preservation() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -990,6 +1031,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_with_mutable_values() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1014,6 +1056,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_stress_test() {
         let mut lru = Lru::new(NonZeroUsize::new(100).unwrap());
 
@@ -1040,6 +1083,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_after_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1071,6 +1115,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_linked_list_consistency() {
         let mut lru = Lru::new(NonZeroUsize::new(10).unwrap());
 
@@ -1103,6 +1148,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_with_tail_tracking() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1129,6 +1175,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_retain_order_preservation() {
         let mut lru = Lru::new(NonZeroUsize::new(6).unwrap());
 
@@ -1166,6 +1213,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_empty_cache() {
         let lru = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         let items: Vec<_> = lru.iter().collect();
@@ -1173,6 +1221,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_single_item() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, "one");
@@ -1183,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_eviction_order() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1197,6 +1247,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_after_access() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1213,6 +1264,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_complex_access_pattern() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1232,6 +1284,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_after_update() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1246,6 +1299,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_with_eviction() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -1260,6 +1314,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_consistency_with_tail() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1279,6 +1334,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_multiple_iterations() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1294,6 +1350,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_iter_after_remove() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1310,6 +1367,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn into_iter_matches_iter() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1324,6 +1382,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_no_modification() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1341,6 +1400,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_with_modification() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1358,6 +1418,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_nonexistent_key() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one");
@@ -1368,12 +1429,14 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_empty_cache() {
         let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         assert!(cache.peek_mut(&1).is_none());
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_single_item() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -1388,6 +1451,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_with_eviction() {
         let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, 10);
@@ -1409,6 +1473,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_preserve_order_on_no_modification() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);
@@ -1428,6 +1493,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_multiple_modifications() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "hello".to_string());
@@ -1445,6 +1511,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_ordering_consistency() {
         let mut cache = Lru::new(NonZeroUsize::new(4).unwrap());
         cache.insert(1, 100);
@@ -1469,6 +1536,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_complex_scenario() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("first", 1);
@@ -1495,6 +1563,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_rapid_succession() {
         let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, vec![1]);
@@ -1511,6 +1580,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_alternating_access() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", 10);
@@ -1536,6 +1606,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_peek_mut_interaction_with_get() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);

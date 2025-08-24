@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod lfu;
+mod linked_hashmap;
 mod lru;
 mod mru;
 mod queue;
@@ -11,14 +12,12 @@ mod queue;
 mod random;
 mod r#ref;
 mod sieve;
-mod utils;
 
 use std::{
     hash::Hash,
     num::NonZeroUsize,
 };
 
-use indexmap::IndexMap;
 pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
@@ -31,6 +30,11 @@ pub use random::RandomPolicy;
 pub use r#ref::Entry;
 pub use sieve::SievePolicy;
 
+use crate::linked_hashmap::{
+    LinkedHashMap,
+    Ptr,
+};
+
 #[cfg(not(feature = "ahash"))]
 type RandomState = std::hash::RandomState;
 #[cfg(feature = "ahash")]
@@ -38,6 +42,35 @@ type RandomState = ahash::RandomState;
 
 mod private {
     pub trait Sealed {}
+}
+
+#[doc(hidden)]
+#[must_use]
+pub enum InsertionResult<K, T> {
+    Inserted(Ptr),
+    Updated(Ptr),
+    FoundTouchedNoUpdate(Ptr),
+    NotFoundNoInsert(K, Option<T>),
+}
+
+impl<K, T> std::fmt::Debug for InsertionResult<K, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InsertionResult::Inserted(ptr) => f.debug_tuple("Inserted").field(ptr).finish(),
+            InsertionResult::Updated(ptr) => f.debug_tuple("Updated").field(ptr).finish(),
+            InsertionResult::FoundTouchedNoUpdate(ptr) => {
+                f.debug_tuple("FoundTouchedNoUpdate").field(ptr).finish()
+            }
+            InsertionResult::NotFoundNoInsert(_, _) => f.debug_tuple("NotFoundNoInsert").finish(),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub enum InsertOrUpdateAction<T> {
+    InsertOrUpdate(T),
+    TouchNoUpdate,
+    NoInsert(Option<T>),
 }
 
 /// Trait for wrapping values in cache entries.
@@ -129,7 +162,7 @@ pub trait Metadata<T>: Default + private::Sealed {
     /// This method provides the core eviction logic by identifying which
     /// entry in the cache should be removed when space is needed. The
     /// returned index corresponds to a position in the cache's internal
-    /// storage (typically an `IndexMap`).
+    /// storage (typically an `LinkedHashMap`).
     ///
     /// # Returns
     ///
@@ -158,10 +191,7 @@ pub trait Metadata<T>: Default + private::Sealed {
     /// - The cache is at capacity and a new entry needs to be inserted
     /// - The `pop()` method is called to explicitly remove the tail entry
     /// - The `tail()` method is called to inspect the next eviction candidate
-    fn candidate_removal_index<K>(
-        &self,
-        queue: &IndexMap<K, Self::EntryType, RandomState>,
-    ) -> usize;
+    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, Self::EntryType>) -> Ptr;
 }
 
 /// Trait defining cache eviction policies.
@@ -228,6 +258,14 @@ pub trait Policy<T>: private::Sealed {
     /// The iterator type returned by `into_iter()`.
     type IntoIter<K>: Iterator<Item = (K, T)>;
 
+    fn insert_or_update_entry<K: Hash + Eq>(
+        key: K,
+        make_room_on_insert: bool,
+        get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
+        metadata: &mut Self::MetadataType,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> InsertionResult<K, T>;
+
     /// Updates the entry's position in the eviction order.
     ///
     /// This method is called when an entry is accessed (via get, insert, etc.)
@@ -240,24 +278,22 @@ pub trait Policy<T>: private::Sealed {
     ///
     /// # Returns
     /// The new index of the entry after any reordering
-    fn touch_entry<K>(
-        index: usize,
-        make_room: bool,
+    fn touch_entry<K: Hash + Eq>(
+        ptr: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
-    ) -> usize;
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    );
 
-    /// Evict the next entry from the cache. Returns the actual evicted index.
-    #[allow(clippy::type_complexity)]
-    fn evict_entry<K>(
+    /// Evict the next entry from the cache. Returns the pointer to the next
+    /// entry in the queue after removal, and the removed key-value pair if
+    /// available.
+    #[inline]
+    fn evict_entry<K: Hash + Eq>(
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
-    ) -> (
-        usize,
-        Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
-    ) {
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)> {
         let removed = metadata.candidate_removal_index(queue);
-        (removed, Self::swap_remove_entry(removed, metadata, queue))
+        Self::remove_entry(removed, metadata, queue).1
     }
 
     /// Removes the entry at the specified index and returns the index of the
@@ -278,12 +314,17 @@ pub trait Policy<T>: private::Sealed {
     /// - `queue`: Mutable reference to the cache's storage
     ///
     /// # Returns
+    /// - A pointer to the next entry in the queue after removal
     /// - The removed key-value pair, or None if the index was invalid
-    fn swap_remove_entry<K>(
-        index: usize,
+    #[allow(clippy::type_complexity)]
+    fn remove_entry<K: Hash + Eq>(
+        ptr: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
-    ) -> Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>;
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+    ) -> (
+        Ptr,
+        Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
+    );
 
     /// Returns an iterator over the entries in the cache in eviction order.
     ///
@@ -310,7 +351,7 @@ pub trait Policy<T>: private::Sealed {
     /// An iterator yielding `(&Key, &Value)` pairs in eviction order
     fn iter<'q, K>(
         metadata: &'q Self::MetadataType,
-        queue: &'q IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+        queue: &'q LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q;
@@ -344,7 +385,7 @@ pub trait Policy<T>: private::Sealed {
     /// this a consuming operation.
     fn into_iter<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+        queue: LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
     ) -> Self::IntoIter<K>;
 
     /// Converts the cache entries into an iterator of key-entry pairs in
@@ -376,7 +417,7 @@ pub trait Policy<T>: private::Sealed {
     /// For typical usage, prefer `into_iter()` which extracts just the values.
     fn into_entries<K>(
         metadata: Self::MetadataType,
-        queue: IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+        queue: LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
     ) -> impl Iterator<Item = (K, <Self::MetadataType as Metadata<T>>::EntryType)>;
 
     /// Validates the cache's internal state against the full set of kv pairs
@@ -386,7 +427,7 @@ pub trait Policy<T>: private::Sealed {
     #[doc(hidden)]
     fn debug_validate<K: Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &IndexMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
+        queue: &LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
     ) where
         T: std::fmt::Debug;
 }
@@ -1129,7 +1170,7 @@ impl Statistics {
 /// - Pre-allocates space for `capacity` entries to minimize reallocations
 /// - Automatically evicts entries when capacity is exceeded
 pub struct Cache<Key, Value, PolicyType: Policy<Value>> {
-    queue: IndexMap<Key, <PolicyType::MetadataType as Metadata<Value>>::EntryType, RandomState>,
+    queue: LinkedHashMap<Key, <PolicyType::MetadataType as Metadata<Value>>::EntryType>,
     capacity: NonZeroUsize,
     metadata: PolicyType::MetadataType,
 
@@ -1196,7 +1237,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            queue: IndexMap::with_capacity_and_hasher(capacity.get(), RandomState::default()),
+            queue: LinkedHashMap::with_capacity(capacity.get()),
             capacity,
             metadata: PolicyType::MetadataType::default(),
             #[cfg(feature = "statistics")]
@@ -1376,10 +1417,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - **No modification**: No additional overhead beyond the lookup
     /// - **With modification**: O(1) cache reordering when the `Entry` is
     ///   dropped
-    pub fn peek_mut(&'_ mut self, key: &Key) -> Option<Entry<'_, Key, Value, PolicyType>> {
+    pub fn peek_mut<'q>(&'q mut self, key: &'q Key) -> Option<Entry<'q, Key, Value, PolicyType>> {
         self.queue
-            .get_index_of(key)
-            .map(|index| Entry::new(index, self))
+            .get_ptr(key)
+            .map(|ptr| Entry::new(ptr, key, self))
     }
 
     /// Returns a reference to the entry that would be evicted next.
@@ -1422,9 +1463,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(value, &"one".to_string());
     /// ```
     pub fn tail(&self) -> Option<(&Key, &Value)> {
+        let ptr = self.metadata.candidate_removal_index(&self.queue);
         self.queue
-            .get_index(self.metadata.candidate_removal_index(&self.queue))
-            .map(|(key, entry)| (key, entry.value()))
+            .ptr_get_entry(ptr)
+            .map(|(key, value)| (key, value.value()))
     }
 
     /// Returns true if the cache contains the given key.
@@ -1539,41 +1581,42 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         key: Key,
         or_insert: impl FnOnce(&Key) -> Value,
     ) -> &mut Value {
-        let len = self.queue.len();
-        match self.queue.entry(key) {
-            indexmap::map::Entry::Occupied(o) => {
-                let index =
-                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
-
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.hits += 1;
+        let will_evict = self.queue.len() == self.capacity.get();
+        let result = PolicyType::insert_or_update_entry(
+            key,
+            will_evict,
+            |value, is_insert| {
+                if is_insert {
+                    InsertOrUpdateAction::InsertOrUpdate(or_insert(value))
+                } else {
+                    InsertOrUpdateAction::TouchNoUpdate
                 }
+            },
+            &mut self.metadata,
+            &mut self.queue,
+        );
 
-                self.queue[index].value_mut()
-            }
-            indexmap::map::Entry::Vacant(v) => {
-                let index = v.index();
-                let e = <PolicyType::MetadataType as Metadata<Value>>::EntryType::new(or_insert(
-                    v.key(),
-                ));
-                v.insert(e);
+        match result {
+            InsertionResult::Inserted(ptr) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
                     self.statistics.misses += 1;
 
-                    self.statistics.evictions += u64::from(len == self.capacity.get());
+                    self.statistics.evictions += u64::from(will_evict);
                 }
 
-                let index = PolicyType::touch_entry(
-                    index,
-                    len == self.capacity.get(),
-                    &mut self.metadata,
-                    &mut self.queue,
-                );
-                self.queue[index].value_mut()
+                self.queue[ptr].value_mut()
             }
+            InsertionResult::FoundTouchedNoUpdate(ptr) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
+                self.queue[ptr].value_mut()
+            }
+            _ => unreachable!("Unexpected insertion result: {:?}", result),
         }
     }
 
@@ -1707,39 +1750,34 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// );
     /// ```
     pub fn insert_mut(&mut self, key: Key, value: Value) -> &mut Value {
-        let len = self.queue.len();
-        match self.queue.entry(key) {
-            indexmap::map::Entry::Occupied(mut o) => {
-                *o.get_mut().value_mut() = value;
-                let index =
-                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+        let will_evict = self.queue.len() == self.capacity.get();
+        let result = PolicyType::insert_or_update_entry(
+            key,
+            will_evict,
+            |_, _| InsertOrUpdateAction::InsertOrUpdate(value),
+            &mut self.metadata,
+            &mut self.queue,
+        );
 
+        match result {
+            InsertionResult::Inserted(ptr) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.insertions += 1;
+                    self.statistics.evictions += u64::from(will_evict);
+                }
+
+                self.queue[ptr].value_mut()
+            }
+            InsertionResult::Updated(ptr) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.hits += 1;
                 }
 
-                self.queue[index].value_mut()
+                self.queue[ptr].value_mut()
             }
-            indexmap::map::Entry::Vacant(v) => {
-                let index = v.index();
-                v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
-
-                let index = PolicyType::touch_entry(
-                    index,
-                    len == self.capacity.get(),
-                    &mut self.metadata,
-                    &mut self.queue,
-                );
-
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.insertions += 1;
-                    self.statistics.evictions += u64::from(len == self.capacity.get());
-                }
-
-                self.queue[index].value_mut()
-            }
+            _ => unreachable!("Unexpected insertion result: {:?}", result),
         }
     }
 
@@ -1819,41 +1857,40 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         key: Key,
         value: Value,
     ) -> Result<&mut Value, (Key, Value)> {
-        let len = self.queue.len();
-        match self.queue.entry(key) {
-            indexmap::map::Entry::Occupied(mut o) => {
-                *o.get_mut().value_mut() = value;
-                let index =
-                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
-
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.hits += 1;
+        let will_evict = self.queue.len() == self.capacity.get();
+        let result = PolicyType::insert_or_update_entry(
+            key,
+            false,
+            |_, is_insert| {
+                if is_insert && will_evict {
+                    InsertOrUpdateAction::NoInsert(Some(value))
+                } else {
+                    InsertOrUpdateAction::InsertOrUpdate(value)
                 }
+            },
+            &mut self.metadata,
+            &mut self.queue,
+        );
 
-                Ok(self.queue[index].value_mut())
-            }
-            indexmap::map::Entry::Vacant(v) => {
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.misses += 1;
-                }
-
-                if len >= self.capacity.get() {
-                    return Err((v.into_key(), value));
-                }
-
+        match result {
+            InsertionResult::Inserted(ptr) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
                 }
 
-                let index = v.index();
-                v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
-                let index =
-                    PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
-                Ok(self.queue[index].value_mut())
+                Ok(self.queue[ptr].value_mut())
             }
+            InsertionResult::Updated(ptr) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
+                Ok(self.queue[ptr].value_mut())
+            }
+            InsertionResult::NotFoundNoInsert(k, v) => Err((k, v.unwrap())),
+            _ => unreachable!("Unexpected insertion result: {:?}", result),
         }
     }
 
@@ -1960,42 +1997,49 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         key: Key,
         or_insert: impl FnOnce(&Key) -> Value,
     ) -> Result<&mut Value, Key> {
-        let len = self.queue.len();
-        match self.queue.entry(key) {
-            indexmap::map::Entry::Occupied(o) => {
-                let index =
-                    PolicyType::touch_entry(o.index(), false, &mut self.metadata, &mut self.queue);
+        let will_evict = self.queue.len() == self.capacity.get();
 
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.hits += 1;
+        let result = PolicyType::insert_or_update_entry(
+            key,
+            false,
+            |key, is_insert| {
+                if is_insert && !will_evict {
+                    InsertOrUpdateAction::InsertOrUpdate(or_insert(key))
+                } else if !is_insert {
+                    InsertOrUpdateAction::TouchNoUpdate
+                } else {
+                    InsertOrUpdateAction::NoInsert(None)
                 }
+            },
+            &mut self.metadata,
+            &mut self.queue,
+        );
 
-                Ok(self.queue[index].value_mut())
-            }
-            indexmap::map::Entry::Vacant(v) => {
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.misses += 1;
-                }
-
-                if len >= self.capacity.get() {
-                    return Err(v.into_key());
-                }
-
+        match result {
+            InsertionResult::Inserted(ptr) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
                 }
 
-                let index = v.index();
-                let e = <PolicyType::MetadataType as Metadata<Value>>::EntryType::new(or_insert(
-                    v.key(),
-                ));
-                v.insert(e);
-                let index =
-                    PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
-                Ok(self.queue[index].value_mut())
+                Ok(self.queue[ptr].value_mut())
+            }
+            InsertionResult::Updated(ptr) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
+                Ok(self.queue[ptr].value_mut())
+            }
+            InsertionResult::NotFoundNoInsert(k, _) => Err(k),
+            InsertionResult::FoundTouchedNoUpdate(ptr) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
+                Ok(self.queue[ptr].value_mut())
             }
         }
     }
@@ -2047,8 +2091,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// );
     /// ```
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
-        if let Some(index) = self.queue.get_index_of(key) {
-            let index = PolicyType::touch_entry(index, false, &mut self.metadata, &mut self.queue);
+        if let Some(index) = self.queue.get_ptr(key) {
+            PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
 
             #[cfg(feature = "statistics")]
             {
@@ -2102,16 +2146,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// );
     /// ```
     pub fn pop(&mut self) -> Option<(Key, Value)> {
-        PolicyType::evict_entry(&mut self.metadata, &mut self.queue)
-            .1
-            .map(|(key, entry)| {
-                #[cfg(feature = "statistics")]
-                {
-                    self.statistics.evictions += 1;
-                }
+        PolicyType::evict_entry(&mut self.metadata, &mut self.queue).map(|(key, entry)| {
+            #[cfg(feature = "statistics")]
+            {
+                self.statistics.evictions += 1;
+            }
 
-                (key, entry.into_value())
-            })
+            (key, entry.into_value())
+        })
     }
 
     /// Removes a specific entry from the cache.
@@ -2148,8 +2190,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// );
     /// ```
     pub fn remove(&mut self, key: &Key) -> Option<Value> {
-        if let Some(index) = self.queue.get_index_of(key) {
-            PolicyType::swap_remove_entry(index, &mut self.metadata, &mut self.queue)
+        if let Some(index) = self.queue.get_ptr(key) {
+            PolicyType::remove_entry(index, &mut self.metadata, &mut self.queue)
+                .1
                 .map(|(_, entry)| entry.into_value())
         } else {
             None
@@ -2715,14 +2758,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     where
         F: FnMut(&Key, &mut Value) -> bool,
     {
-        let mut offset = 0;
-        for idx in 0..self.queue.len() {
-            let Some((k, v)) = self.queue.get_index_mut(idx - offset) else {
-                break;
-            };
+        let mut next = self.queue.head_cursor_mut();
+        while let Some((k, v)) = next.current_mut() {
             if !f(k, v.value_mut()) {
-                PolicyType::swap_remove_entry(idx - offset, &mut self.metadata, &mut self.queue);
-                offset += 1;
+                let (ptr, _) =
+                    PolicyType::remove_entry(next.ptr(), &mut self.metadata, &mut self.queue);
+                next = self.queue.ptr_cursor_mut(ptr);
+            } else {
+                next.move_next();
             }
         }
     }
@@ -2806,42 +2849,39 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
     where
         I: IntoIterator<Item = (Key, Value)>,
     {
-        let mut queue: IndexMap<
+        let mut queue: LinkedHashMap<
             Key,
             <PolicyType::MetadataType as Metadata<Value>>::EntryType,
-            RandomState,
-        > = IndexMap::with_hasher(RandomState::default());
+        > = LinkedHashMap::default();
         let mut metadata = PolicyType::MetadataType::default();
 
         #[cfg(feature = "statistics")]
         let mut hits = 0;
         #[cfg(feature = "statistics")]
         let mut insertions = 0;
-        #[cfg(feature = "statistics")]
-        let mut misses = 0;
 
         for (key, value) in iter {
-            match queue.entry(key) {
-                indexmap::map::Entry::Occupied(mut o) => {
-                    *o.get_mut().value_mut() = value;
-                    PolicyType::touch_entry(o.index(), false, &mut metadata, &mut queue);
-
+            let result = PolicyType::insert_or_update_entry(
+                key,
+                false,
+                |_, _| InsertOrUpdateAction::InsertOrUpdate(value),
+                &mut metadata,
+                &mut queue,
+            );
+            match result {
+                InsertionResult::Inserted(_) => {
+                    #[cfg(feature = "statistics")]
+                    {
+                        insertions += 1;
+                    }
+                }
+                InsertionResult::Updated(_) => {
                     #[cfg(feature = "statistics")]
                     {
                         hits += 1;
                     }
                 }
-                indexmap::map::Entry::Vacant(v) => {
-                    let index = v.index();
-                    v.insert(<PolicyType::MetadataType as Metadata<Value>>::EntryType::new(value));
-                    PolicyType::touch_entry(index, false, &mut metadata, &mut queue);
-
-                    #[cfg(feature = "statistics")]
-                    {
-                        insertions += 1;
-                        misses += 1;
-                    }
-                }
+                _ => unreachable!("Unexpected insertion result: {:?}", result),
             }
         }
 
@@ -2854,7 +2894,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
                 evictions: 0,
                 len: queue.len(),
                 capacity,
-                misses,
+                misses: 0,
             },
             queue,
             capacity,
@@ -2900,7 +2940,10 @@ mod tests {
     //! These are mostly just tests to make sure that if the stored k/v pairs
     //! implement various traits, the Cache also implements those traits.
 
+    use ntest::timeout;
+
     #[test]
+    #[timeout(1000)]
     fn test_lru_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -2920,6 +2963,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lfu_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -2939,6 +2983,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_mru_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -2956,6 +3001,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -2975,6 +3021,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -2994,6 +3041,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     #[cfg(feature = "rand")]
     fn test_random_cache_clone() {
         use std::num::NonZeroUsize;
@@ -3014,6 +3062,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_sieve_cache_clone() {
         use std::num::NonZeroUsize;
 
@@ -3033,6 +3082,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lfu_cache_debug() {
         use std::num::NonZeroUsize;
 
@@ -3052,6 +3102,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lru_cache_debug() {
         use std::num::NonZeroUsize;
 
@@ -3071,6 +3122,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_mru_cache_debug() {
         use std::num::NonZeroUsize;
 
@@ -3090,6 +3142,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_fifo_cache_debug() {
         use std::num::NonZeroUsize;
 
@@ -3109,6 +3162,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_lifo_cache_debug() {
         use std::num::NonZeroUsize;
 
@@ -3128,6 +3182,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     #[cfg(feature = "rand")]
     fn test_random_cache_debug() {
         use std::num::NonZeroUsize;
@@ -3148,6 +3203,7 @@ mod tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_sieve_cache_debug() {
         use std::num::NonZeroUsize;
 
@@ -3169,9 +3225,12 @@ mod tests {
 
 #[cfg(all(test, feature = "statistics"))]
 mod statistics_tests {
+    use ntest::timeout;
+
     use super::*;
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_initialization() {
         let cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
         let stats = cache.statistics();
@@ -3185,6 +3244,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_insertions_and_misses() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3201,6 +3261,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_hits() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3219,6 +3280,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_misses_on_failed_get() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3235,6 +3297,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_evictions() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(2).unwrap());
 
@@ -3254,6 +3317,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_with_get_or_insert_with() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3276,6 +3340,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_with_try_insert() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(2).unwrap());
 
@@ -3299,6 +3364,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_reset() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3324,6 +3390,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_with_remove() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3345,6 +3412,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_with_clear() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3366,6 +3434,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_with_set_capacity() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
@@ -3388,6 +3457,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_with_different_policies() {
         // Test with LFU policy
         let mut lfu_cache = Cache::<i32, String, LfuPolicy>::new(NonZeroUsize::new(2).unwrap());
@@ -3415,6 +3485,7 @@ mod statistics_tests {
     }
 
     #[test]
+    #[timeout(1000)]
     fn test_statistics_clone() {
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
 
