@@ -33,7 +33,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 0..10000 {
-                            black_box(cache.insert(i, i));
+                            black_box(cache.insert(black_box(i), black_box(i)));
                         }
                     });
                 });
@@ -46,7 +46,7 @@ macro_rules! bench_set {
                     let mut cache = $cache::new(NonZeroUsize::new(10000).unwrap());
                     b.iter(|| {
                         for i in 0..10000 {
-                            black_box(cache.insert(i, i));
+                            black_box(cache.insert(black_box(i), black_box(i)));
                         }
                     });
                 });
@@ -62,7 +62,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 0..10000 {
-                            black_box(cache.get(&i));
+                            black_box(cache.get(black_box(&i)));
                         }
                     });
                 });
@@ -72,15 +72,20 @@ macro_rules! bench_set {
             pub fn bench_remove(c: &mut Criterion) {
                 let mut group = c.benchmark_group(concat!(stringify!($cache), "_remove"));
                 group.bench_function(criterion::BenchmarkId::from_parameter(10000), |b| {
-                    let mut cache = $cache::new(NonZeroUsize::new(10000).unwrap());
-                    for i in 0..10000 {
-                        cache.insert(i, i);
-                    }
-                    b.iter(|| {
-                        for i in 0..10000 {
-                            black_box(cache.remove(&i));
-                        }
-                    });
+                    b.iter_with_setup(
+                        || {
+                            let mut cache = $cache::new(NonZeroUsize::new(10000).unwrap());
+                            for i in 0..10000 {
+                                cache.insert(i, i);
+                            }
+                            cache
+                        },
+                        |mut cache| {
+                            for i in 0..10000 {
+                                black_box(cache.remove(black_box(&i)));
+                            }
+                        },
+                    );
                 });
                 group.finish();
             }
@@ -94,7 +99,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 0..10000 {
-                            black_box(cache.peek(&i));
+                            black_box(cache.peek(black_box(&i)));
                         }
                     });
                 });
@@ -110,7 +115,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 10000..20000 {
-                            black_box(cache.get(&i));
+                            black_box(cache.get(black_box(&i)));
                         }
                     });
                 });
@@ -126,7 +131,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 10000..20000 {
-                            black_box(cache.peek(&i));
+                            black_box(cache.peek(black_box(&i)));
                         }
                     });
                 });
@@ -142,7 +147,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 10000..20000 {
-                            black_box(cache.remove(&i));
+                            black_box(cache.remove(black_box(&i)));
                         }
                     });
                 });
@@ -158,7 +163,7 @@ macro_rules! bench_set {
                     }
                     b.iter(|| {
                         for i in 10000..20000 {
-                            black_box(cache.insert(i, i));
+                            black_box(cache.insert(black_box(i), black_box(i)));
                         }
                     });
                 });
