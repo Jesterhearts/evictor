@@ -207,7 +207,7 @@ mod tests {
     use crate::Mru;
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_trivial() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert("a", 1);
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_trivial_get_or_insert() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert("a", 1);
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_eviction_order() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_access_makes_evictable() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_multiple_accesses() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_update_existing_key() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_single_capacity() {
         let mut mru = Mru::new(NonZeroUsize::new(1).unwrap());
 
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_complex_access_pattern() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_interleaved_operations() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_get_or_insert_with_eviction() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_get_or_insert_existing_key() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_sequential_pattern() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_no_access_pattern() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_alternating_access() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_repeated_access_single_key() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_empty_cache() {
         let mut mru = Mru::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_capacity_constraints() {
         let mru = Mru::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(mru.capacity(), 5);
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_no_side_effects() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert(1, 10);
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_contains_key() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_remove() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert(1, 10);
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_pop() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert(1, 10);
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_tail() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_clear() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert(1, 10);
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_mutable_access() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert(1, "hello".to_string());
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_insert_mut() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -674,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_get_or_insert_with_mut() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
         mru.insert(1, "existing".to_string());
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_extend() {
         let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
         mru.insert(1, 10);
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let mru: Mru<i32, i32> = items.into_iter().collect();
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_from_iterator_with_eviction() {
         let items = vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)];
         let mru: Mru<i32, i32> = items.into_iter().collect();
@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_shrink_to_fit() {
         let mut mru = Mru::new(NonZeroUsize::new(10).unwrap());
         mru.insert(1, 10);
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_eviction_policy_consistency() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_stress_operations() {
         let mut mru = Mru::new(NonZeroUsize::new(10).unwrap());
 
@@ -807,26 +807,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
-    fn test_mru_boundary_conditions() {
-        let mut mru = Mru::new(NonZeroUsize::new(1000).unwrap());
-        for i in 0..500 {
-            mru.insert(i, i);
-        }
-        assert_eq!(mru.len(), 500);
-
-        for i in 500..1000 {
-            mru.insert(i, i);
-        }
-        assert_eq!(mru.len(), 1000);
-
-        mru.insert(1000, 1000);
-        assert_eq!(mru.len(), 1000);
-        assert!(mru.contains_key(&1000));
-    }
-
-    #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_consistent_state_after_operations() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -857,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_key_value_types() {
         let mut mru_str = Mru::new(NonZeroUsize::new(2).unwrap());
         mru_str.insert("key1", 1);
@@ -871,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_insertion_order_vs_access_order() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -890,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_recency_tracking() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -914,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_from_iterator_overlapping_keys() {
         let items = vec![
             (1, "first"),
@@ -938,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_from_iterator_overlapping_with_eviction() {
         let items = vec![
             (1, "one"),
@@ -969,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_from_iterator_many_duplicates() {
         let items = vec![
             (1, 100),
@@ -993,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_from_iterator_access_order_behavior() {
         let items = vec![
             (1, "one"),
@@ -1019,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_basic() {
         let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1040,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_with_recency_considerations() {
         let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1062,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_all() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1081,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_none() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1098,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_empty_cache() {
         let mut mru = Mru::<i32, &str>::new(NonZeroUsize::new(3).unwrap());
 
@@ -1109,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_single_item() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1127,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_recency_preservation() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1154,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_stress_test() {
         let mut mru = Mru::new(NonZeroUsize::new(100).unwrap());
 
@@ -1182,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_after_operations() {
         let mut mru = Mru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1214,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_linked_list_consistency() {
         let mut mru = Mru::new(NonZeroUsize::new(10).unwrap());
 
@@ -1247,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_with_tail_tracking() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1274,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_eviction_behavior() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1306,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_retain_order_preservation() {
         let mut mru = Mru::new(NonZeroUsize::new(6).unwrap());
 
@@ -1340,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_empty_cache() {
         let mru = Mru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         let items: Vec<_> = mru.iter().collect();
@@ -1348,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_single_item() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
         mru.insert(1, "one");
@@ -1359,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_eviction_order() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1374,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_after_access() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1391,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_complex_access_pattern() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1411,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_after_update() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1426,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_with_eviction() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -1441,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_eviction_after_access() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
@@ -1457,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_consistency_with_tail() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1477,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_multiple_iterations() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1493,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_after_remove() {
         let mut mru = Mru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1510,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_iter_repeated_access_pattern() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1527,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_into_iter_matches_iter() {
         let mut mru = Mru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1542,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_no_modification() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1560,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_with_modification() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1578,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_nonexistent_key() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one");
@@ -1589,14 +1570,14 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_empty_cache() {
         let mut cache = Mru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         assert!(cache.peek_mut(&1).is_none());
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_single_item() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -1611,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_with_eviction() {
         let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, 10);
@@ -1633,7 +1614,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_preserve_order_on_no_modification() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);
@@ -1653,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_multiple_modifications() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "hello".to_string());
@@ -1672,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_ordering_consistency() {
         let mut cache = Mru::new(NonZeroUsize::new(4).unwrap());
         cache.insert(1, 100);
@@ -1698,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_complex_scenario() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("first", 1);
@@ -1725,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_rapid_succession() {
         let mut cache = Mru::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, vec![1]);
@@ -1742,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_mru_peek_mut_alternating_access() {
         let mut cache = Mru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", 10);

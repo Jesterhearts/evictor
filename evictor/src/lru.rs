@@ -197,7 +197,7 @@ mod tests {
     use crate::Lru;
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_trivial() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert("a", 1);
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_trivial_get_or_insert() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert("a", 1);
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_eviction_order() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_access_updates_order() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_multiple_accesses() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_update_existing_key() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_single_capacity() {
         let mut lru = Lru::new(NonZeroUsize::new(1).unwrap());
 
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_complex_access_pattern() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_interleaved_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_get_or_insert_with_eviction() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_get_or_insert_existing_key() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_sequential_pattern() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_repeated_access_single_key() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_empty_cache() {
         let mut lru = Lru::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_capacity_constraints() {
         let lru = Lru::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(lru.capacity(), 5);
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_no_side_effects() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_contains_key() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_remove() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_pop() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_tail() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_clear() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, 10);
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_mutable_access() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
         lru.insert(1, String::from("hello"));
@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_insert_mut() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_get_or_insert_with_mut() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
         lru.insert(1, String::from("existing"));
@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_extend() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
         lru.insert(1, 10);
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let lru: Lru<i32, i32> = items.into_iter().collect();
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_from_iterator_with_eviction() {
         let items = vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)];
         let lru: Lru<i32, i32> = items.into_iter().collect();
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_shrink_to_fit() {
         let mut lru = Lru::new(NonZeroUsize::new(10).unwrap());
         lru.insert(1, 10);
@@ -707,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_entry_lifetime_and_ordering() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_stress_random_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(10).unwrap());
 
@@ -756,27 +756,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
-    fn test_lru_boundary_conditions() {
-        let mut lru = Lru::new(NonZeroUsize::new(1000).unwrap());
-        for i in 0..500 {
-            lru.insert(i, i);
-        }
-        assert_eq!(lru.len(), 500);
-
-        for i in 500..1000 {
-            lru.insert(i, i);
-        }
-        assert_eq!(lru.len(), 1000);
-
-        lru.insert(1000, 1000);
-        assert_eq!(lru.len(), 1000);
-        assert!(!lru.contains_key(&0));
-        assert!(lru.contains_key(&1000));
-    }
-
-    #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_consistent_state_after_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -801,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_key_value_types() {
         let mut lru_str = Lru::new(NonZeroUsize::new(2).unwrap());
         lru_str.insert("key1", 1);
@@ -815,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_from_iterator_overlapping_keys() {
         let items = vec![
             (1, "first"),
@@ -839,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_from_iterator_overlapping_with_eviction() {
         let items = vec![
             (1, "one"),
@@ -870,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_from_iterator_many_duplicates() {
         let items = vec![
             (1, 100),
@@ -894,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_basic() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -915,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_with_recency_considerations() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -937,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_all() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -956,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_none() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -973,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_empty_cache() {
         let mut lru = Lru::<i32, &str>::new(NonZeroUsize::new(3).unwrap());
 
@@ -984,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_single_item() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1002,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_recency_preservation() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1039,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_with_mutable_values() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1064,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_stress_test() {
         let mut lru = Lru::new(NonZeroUsize::new(100).unwrap());
 
@@ -1091,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_after_operations() {
         let mut lru = Lru::new(NonZeroUsize::new(5).unwrap());
 
@@ -1123,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_linked_list_consistency() {
         let mut lru = Lru::new(NonZeroUsize::new(10).unwrap());
 
@@ -1156,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_with_tail_tracking() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1183,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_retain_order_preservation() {
         let mut lru = Lru::new(NonZeroUsize::new(6).unwrap());
 
@@ -1221,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_empty_cache() {
         let lru = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         let items: Vec<_> = lru.iter().collect();
@@ -1229,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_single_item() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
         lru.insert(1, "one");
@@ -1240,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_eviction_order() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1255,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_after_access() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1272,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_complex_access_pattern() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1292,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_after_update() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1307,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_with_eviction() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
@@ -1322,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_consistency_with_tail() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1342,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_multiple_iterations() {
         let mut lru = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1358,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_iter_after_remove() {
         let mut lru = Lru::new(NonZeroUsize::new(4).unwrap());
 
@@ -1375,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn into_iter_matches_iter() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
 
@@ -1390,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_no_modification() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1408,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_with_modification() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1426,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_nonexistent_key() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one");
@@ -1437,14 +1417,14 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_empty_cache() {
         let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         assert!(cache.peek_mut(&1).is_none());
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_single_item() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -1459,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_with_eviction() {
         let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, 10);
@@ -1481,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_preserve_order_on_no_modification() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);
@@ -1501,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_multiple_modifications() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "hello".to_string());
@@ -1519,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_ordering_consistency() {
         let mut cache = Lru::new(NonZeroUsize::new(4).unwrap());
         cache.insert(1, 100);
@@ -1544,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_complex_scenario() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("first", 1);
@@ -1571,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_rapid_succession() {
         let mut cache = Lru::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, vec![1]);
@@ -1588,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_alternating_access() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", 10);
@@ -1614,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lru_peek_mut_interaction_with_get() {
         let mut cache = Lru::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);

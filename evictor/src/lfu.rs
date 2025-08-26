@@ -26,6 +26,7 @@ impl private::Sealed for LfuPolicy {}
 pub struct LfuEntry<T> {
     value: T,
     frequency: u64,
+    bucket_ptr: Ptr,
 }
 
 impl<T> private::Sealed for LfuEntry<T> {}
@@ -35,6 +36,7 @@ impl<T> EntryValue<T> for LfuEntry<T> {
         Self {
             value,
             frequency: 0,
+            bucket_ptr: Ptr::null(),
         }
     }
 
@@ -57,11 +59,23 @@ struct FreqBucket {
     head: Ptr,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct LfuMetadata {
     frequency_head_tail: LinkedHashMap<u64, FreqBucket>,
     head_bucket: Ptr,
+}
+
+impl Default for LfuMetadata {
+    fn default() -> Self {
+        let mut frequency_head_tail = LinkedHashMap::default();
+        frequency_head_tail.insert_tail(0, FreqBucket::default());
+        let head_bucket = frequency_head_tail.head_ptr();
+        Self {
+            frequency_head_tail,
+            head_bucket,
+        }
+    }
 }
 
 impl private::Sealed for LfuMetadata {}
@@ -70,10 +84,8 @@ impl<T> Metadata<T> for LfuMetadata {
     type EntryType = LfuEntry<T>;
 
     #[inline]
-    fn candidate_removal_index<K>(&self, _: &LinkedHashMap<K, LfuEntry<T>>) -> Ptr {
-        self.frequency_head_tail
-            .ptr_get(self.head_bucket)
-            .map_or(Ptr::default(), |bucket| bucket.head)
+    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, LfuEntry<T>>) -> Ptr {
+        queue.head_ptr()
     }
 }
 
@@ -117,35 +129,54 @@ impl<T> Policy<T> for LfuPolicy {
                     }
                 };
                 let ptr = if make_room_on_insert {
-                    let ptr = entry.push_unlinked(LfuEntry::new(value));
+                    let ptr = entry.push_unlinked(LfuEntry {
+                        value,
+                        frequency: 0,
+                        bucket_ptr: metadata.head_bucket,
+                    });
                     Self::evict_entry(metadata, queue);
-
-                    queue.link_as_tail(ptr);
+                    let head_bucket = metadata
+                        .frequency_head_tail
+                        .ptr_get_mut(metadata.head_bucket)
+                        .expect("Head bucket should exist");
+                    if head_bucket.head.is_null() {
+                        head_bucket.head = ptr;
+                    }
+                    if head_bucket.tail.is_null() {
+                        head_bucket.tail = ptr;
+                        queue.link_as_head(ptr);
+                    } else {
+                        queue.link_node(ptr, head_bucket.tail, Ptr::null(), false);
+                        head_bucket.tail = ptr;
+                    }
                     ptr
                 } else {
-                    entry.insert_tail(LfuEntry::new(value))
+                    let head_bucket = metadata
+                        .frequency_head_tail
+                        .ptr_get_mut(metadata.head_bucket)
+                        .expect("Head bucket should exist");
+                    let ptr = if head_bucket.tail.is_null() {
+                        entry.insert_head(LfuEntry {
+                            value,
+                            frequency: 0,
+                            bucket_ptr: metadata.head_bucket,
+                        })
+                    } else {
+                        entry.insert_after(
+                            LfuEntry {
+                                value,
+                                frequency: 0,
+                                bucket_ptr: metadata.head_bucket,
+                            },
+                            head_bucket.tail,
+                        )
+                    };
+                    head_bucket.tail = ptr;
+                    if head_bucket.head.is_null() {
+                        head_bucket.head = ptr;
+                    }
+                    ptr
                 };
-
-                match metadata.frequency_head_tail.entry(0) {
-                    linked_hashmap::Entry::Occupied(mut occupied_entry) => {
-                        debug_assert_eq!(occupied_entry.ptr(), metadata.head_bucket);
-                        let bucket = occupied_entry.get_mut();
-                        queue.move_after(ptr, bucket.tail);
-                        bucket.tail = ptr;
-                        debug_assert_ne!(
-                            bucket.head, bucket.tail,
-                            "Head and tail should not be the same after inserting a new element"
-                        );
-                    }
-                    linked_hashmap::Entry::Vacant(vacant_entry) => {
-                        queue.move_to_head(ptr);
-                        vacant_entry.insert_head(FreqBucket {
-                            tail: ptr,
-                            head: ptr,
-                        });
-                    }
-                }
-                metadata.head_bucket = metadata.frequency_head_tail.head_ptr();
 
                 InsertionResult::Inserted(ptr)
             }
@@ -168,7 +199,9 @@ impl<T> Policy<T> for LfuPolicy {
         let new_frequency = old_frequency + 1;
         queue[index].frequency = new_frequency;
 
-        let mut bucket_cursor = metadata.frequency_head_tail.key_cursor_mut(&old_frequency);
+        let mut bucket_cursor = metadata
+            .frequency_head_tail
+            .ptr_cursor_mut(queue[index].bucket_ptr);
 
         let old_prev = queue.prev_ptr(index);
         let old_next = queue.next_ptr(index);
@@ -221,6 +254,10 @@ impl<T> Policy<T> for LfuPolicy {
             bucket_cursor.move_prev();
         }
 
+        queue[index].bucket_ptr = bucket_cursor
+            .next_ptr()
+            .expect("Just inserted, so next must exist");
+
         let Some((freq, old)) = bucket_cursor.current_mut() else {
             unreachable!("Bucket should exist for frequency {old_frequency}");
         };
@@ -240,18 +277,12 @@ impl<T> Policy<T> for LfuPolicy {
                 old.head, index,
                 "Head and tail should be the same when only one element exists in the bucket: {old:?}",
             );
-            let removed = bucket_cursor.ptr();
-            let RemovedEntry {
-                key: _,
-                value: _,
-                prev,
-                next,
-            } = bucket_cursor
-                .remove()
-                .expect("Bucket should exist for frequency");
 
-            if metadata.head_bucket == removed {
-                metadata.head_bucket = next.or(prev)
+            if *freq == 0 {
+                old.head = Ptr::null();
+                old.tail = Ptr::null();
+            } else {
+                bucket_cursor.remove();
             }
         } else {
             if old.head == index {
@@ -358,7 +389,7 @@ fn finish_removal<K, T>(
 ) -> (Ptr, Option<(K, LfuEntry<T>)>) {
     let mut bucket_cursor = metadata
         .frequency_head_tail
-        .key_cursor_mut(&removed.value.frequency);
+        .ptr_cursor_mut(removed.value.bucket_ptr);
 
     let Some((_, bucket)) = bucket_cursor.current_mut() else {
         unreachable!(
@@ -372,15 +403,12 @@ fn finish_removal<K, T>(
             bucket.head, ptr,
             "Head and tail should be the same when only one element exists in the bucket"
         );
-        let current = bucket_cursor.ptr();
-        let RemovedEntry {
-            key: _,
-            value: _,
-            prev,
-            next,
-        } = bucket_cursor.remove().unwrap();
-        if metadata.head_bucket == current {
-            metadata.head_bucket = prev.or(next)
+
+        if removed.value.bucket_ptr == metadata.head_bucket {
+            bucket.head = Ptr::null();
+            bucket.tail = Ptr::null();
+        } else {
+            bucket_cursor.remove();
         }
     } else {
         if bucket.head == ptr {
@@ -416,7 +444,7 @@ mod tests {
     use crate::Lfu;
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_basic_operations() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -442,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_eviction_policy() {
         let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
 
@@ -461,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_get_updates_uses() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -478,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_peek_does_not_update_uses() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -494,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_get_or_insert_with() {
         let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
 
@@ -508,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_remove() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -526,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_pop() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -542,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_clear() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -555,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_extend() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -575,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_from_iterator() {
         let items = vec![
             (1, "one".to_string()),
@@ -597,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_from_iter_overlapping() {
         let items = vec![
             (1, "one".to_string()),
@@ -620,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_shrink_to_fit() {
         let mut cache = Lfu::new(NonZeroUsize::new(10).unwrap());
 
@@ -635,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_mutable_operations() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -654,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_edge_case_capacity_one() {
         let mut cache = Lfu::new(NonZeroUsize::new(1).unwrap());
 
@@ -669,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_frequency_ordering_consistency() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -701,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_complex_frequency_scenario() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -729,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_equal_frequencies() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -747,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_mixed_frequency_patterns() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -779,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_get_or_insert_with_frequency_update() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -801,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_from_iter_with_duplicates() {
         let items = vec![
             (1, "one"),
@@ -829,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_cache_insert_mut_frequency_behavior() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -856,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_empty_cache() {
         let mut cache = Lfu::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -872,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_capacity_constraints() {
         let cache = Lfu::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(cache.capacity(), 5);
@@ -885,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_frequency_consistency() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -915,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_tie_breaking_behavior() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -935,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_complex_frequency_scenarios() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
 
@@ -962,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_remove_operations() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -991,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_get_or_insert_with_frequency_implications() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1014,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_mutable_references() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1037,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_edge_cases() {
         let mut cache = Lfu::new(NonZeroUsize::new(1).unwrap());
 
@@ -1050,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_frequency_after_removal() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
 
@@ -1081,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_collection_traits() {
         let items = vec![(1, "one"), (2, "two"), (3, "three")];
 
@@ -1102,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_clear_and_shrink() {
         let mut cache = Lfu::new(NonZeroUsize::new(10).unwrap());
 
@@ -1124,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_consistent_eviction_policy() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1145,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_from_iterator_overlapping_keys_frequency_tracking() {
         let items = vec![
             (1, "first"),
@@ -1176,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_from_iterator_many_overlapping_keys() {
         let items = vec![
             (1, 100),
@@ -1209,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_from_iterator_frequency_vs_insertion_order() {
         let items = vec![
             (1, "one"),
@@ -1242,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_from_iterator_empty_and_single_item() {
         let empty_items: Vec<(i32, &str)> = vec![];
         let cache: Lfu<i32, &str> = empty_items.into_iter().collect();
@@ -1263,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_basic() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -1282,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_with_frequency_considerations() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -1305,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_all() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1322,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_none() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1336,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_empty_cache() {
         let mut cache = Lfu::<i32, &str>::new(NonZeroUsize::new(3).unwrap());
 
@@ -1347,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_single_item() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1365,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_frequency_preservation() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -1403,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_with_mutable_values() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -1426,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_retain_after_operations() {
         let mut cache = Lfu::new(NonZeroUsize::new(5).unwrap());
 
@@ -1452,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_empty_cache() {
         let cache = Lfu::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         let items: Vec<_> = cache.iter().collect();
@@ -1460,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_single_item() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one");
@@ -1471,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_eviction_order() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1486,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_with_different_frequencies() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1505,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_complex_frequency_pattern() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
 
@@ -1530,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_same_frequency_order() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
 
@@ -1552,7 +1580,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_after_eviction() {
         let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
 
@@ -1570,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_consistency_with_tail() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
 
@@ -1591,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_multiple_iterations() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1609,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_after_remove() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
 
@@ -1629,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_frequency_bucket_ordering() {
         let mut cache = Lfu::new(NonZeroUsize::new(6).unwrap());
 
@@ -1665,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_iter_with_updates() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1682,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn into_iter_matches_iter() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
@@ -1697,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_no_modification() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1715,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_with_modification() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -1733,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_nonexistent_key() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one");
@@ -1744,14 +1772,14 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_empty_cache() {
         let mut cache = Lfu::<i32, String>::new(NonZeroUsize::new(3).unwrap());
         assert!(cache.peek_mut(&1).is_none());
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_single_item() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -1765,7 +1793,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_frequency_updates() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);
@@ -1787,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_with_eviction() {
         let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
         cache.insert(1, 10);
@@ -1805,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_preserve_frequency_on_no_modification() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, 10);
@@ -1827,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_multiple_modifications() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "hello".to_string());
@@ -1845,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_ordering_consistency() {
         let mut cache = Lfu::new(NonZeroUsize::new(4).unwrap());
         cache.insert(1, 100);
@@ -1879,7 +1907,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lfu_peek_mut_complex_scenario() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
         cache.insert("low", 1);

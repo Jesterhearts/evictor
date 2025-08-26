@@ -2301,6 +2301,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(cache.len(), 2); // One entry was evicted
     /// ```
     pub fn set_capacity(&mut self, capacity: NonZeroUsize) -> Vec<(Key, Value)> {
+        asssert!(capacity.get() as u32 < u32::MAX - 1, "Capacity too large");
         let mut evicted = Vec::with_capacity(self.queue.len().saturating_sub(capacity.get()));
         if capacity.get() < self.queue.len() {
             // If new capacity is smaller than current size, we need to evict

@@ -9,15 +9,29 @@ value, O(1) average core ops, and interchangeable eviction behavior chosen by a 
 
 ## Policies at a glance
 
-| Policy | Evicts                       | Primary signal                | Extra per‑entry bytes (approx)               | Notes                                         |
-| ------ | ---------------------------- | ----------------------------- | -------------------------------------------- | --------------------------------------------- |
-| Lru    | Least recently used          | Recency                       | 2 * usize (prev/next)                        | Doubly linked list of entries                 |
-| Mru    | Most recently used           | Recency (inverted)            | 2 * usize                                    | Same structure as LRU, opposite victim        |
-| Lfu    | Least frequently used        | Frequency + recency tie break | 2 * usize + u64 + (bucket index bookkeeping) | Frequency buckets; O(1) amortized updates     |
-| Fifo   | Oldest inserted              | Insertion order               | 2 * usize                                    | Queue semantics (head victim)                 |
-| Lifo   | Newest inserted              | Insertion order               | 2 * usize                                    | Stack semantics (head victim)                 |
-| Random | Random entry                 | RNG                           | None                                         | Requires `rand` feature (default)             |
-| Sieve  | First unvisited (2nd chance) | Visited bit pass              | 2 * usize + 1 byte                           | Implements NSDI'24 SIEVE (see [paper][paper]) |
+| Policy | Evicts                       | Primary signal                | Notes                                         |
+| ------ | ---------------------------- | ----------------------------- | --------------------------------------------- |
+| Lru    | Least recently used          | Recency                       | Doubly linked list of entries                 |
+| Mru    | Most recently used           | Recency (inverted)            | Same structure as LRU, opposite victim        |
+| Lfu    | Least frequently used        | Frequency + recency tie break | Frequency buckets; O(1) amortized updates     |
+| Fifo   | Oldest inserted              | Insertion order               | Queue semantics (head victim)                 |
+| Lifo   | Newest inserted              | Insertion order               | Stack semantics (head victim)                 |
+| Random | Random entry                 | RNG                           | Requires `rand` feature (default)             |
+| Sieve  | First unvisited (2nd chance) | Visited bit pass              | Implements NSDI'24 SIEVE (see [paper][paper]) |
+
+## Max Capacity
+The maximum capacity of a cache must be specified at creation time (minimum 1, maximum 2^32 - 1),
+although it may later be changed with `set_capacity()`. Insertion of a new entry when at capacity
+evicts an existing entry according to the policy.
+
+## Size overhead
+All policies use a custom linked hash map implementation, which has a per-entry overhead of 4 u32s
+(16 bytes) plus the size of the key + value. LFU has additional overhead for frequency buckets,
+which is small compared to the entry overhead unless there are many unique frequencies.
+
+The four u32s are for the doubly linked list (2), an index into a compressed list of linked list
+pointers, and of course, the actual entry in the reverse mapping. These are needed to achieve O(1)
+updates for all policies.
 
 
 ## Quick start
@@ -113,7 +127,7 @@ patterns.
 
 ### Safety & Guarantees
 
-* No unsafe code in library (although e.g. indexmap may use some).
+* No unsafe code in library (although e.g. hashbrown may use some).
 
 ### License
 

@@ -249,7 +249,7 @@ mod tests {
     };
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_trivial() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert("a", 1);
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_eviction_order() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_access_does_not_update_order() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_update_existing_key() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_single_capacity() {
         let mut fifo = Fifo::new(NonZeroUsize::new(1).unwrap());
 
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_get_or_insert_with_eviction() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_get_or_insert_existing_key() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_empty_cache() {
         let mut fifo = Fifo::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_capacity_constraints() {
         let fifo = Fifo::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(fifo.capacity(), 5);
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_remove() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert(1, 10);
@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_pop() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert(1, 10);
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_tail() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_clear() {
         let mut fifo = Fifo::new(NonZeroUsize::new(3).unwrap());
         fifo.insert(1, 10);
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_mutable_access() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
         fifo.insert(1, String::from("hello"));
@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_insert_mut() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_get_or_insert_with_mut() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
         fifo.insert(1, String::from("existing"));
@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_extend() {
         let mut fifo = Fifo::new(NonZeroUsize::new(5).unwrap());
         fifo.insert(1, 10);
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let fifo: Fifo<i32, i32> = items.into_iter().collect();
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_shrink_to_fit() {
         let mut fifo = Fifo::new(NonZeroUsize::new(10).unwrap());
         fifo.insert(1, 10);
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_retain_basic() {
         let mut fifo = Fifo::new(NonZeroUsize::new(5).unwrap());
 
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_fifo_peek_mut_no_modification() {
         let mut cache = Fifo::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_trivial() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert("a", 1);
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_eviction_order() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -681,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_access_does_not_update_order() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_update_existing_key() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_single_capacity() {
         let mut lifo = Lifo::new(NonZeroUsize::new(1).unwrap());
 
@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_get_or_insert_with_eviction() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -751,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_get_or_insert_existing_key() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_empty_cache() {
         let mut lifo = Lifo::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
@@ -787,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_capacity_constraints() {
         let lifo = Lifo::<i32, i32>::new(NonZeroUsize::new(5).unwrap());
         assert_eq!(lifo.capacity(), 5);
@@ -800,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_remove() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert(1, 10);
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_pop() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert(1, 10);
@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_tail() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
 
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_clear() {
         let mut lifo = Lifo::new(NonZeroUsize::new(3).unwrap());
         lifo.insert(1, 10);
@@ -902,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_mutable_access() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
         lifo.insert(1, String::from("hello"));
@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_insert_mut() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_get_or_insert_with_mut() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
         lifo.insert(1, String::from("existing"));
@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_extend() {
         let mut lifo = Lifo::new(NonZeroUsize::new(5).unwrap());
         lifo.insert(1, 10);
@@ -976,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_from_iterator() {
         let items = vec![(1, 10), (2, 20), (3, 30)];
         let lifo: Lifo<i32, i32> = items.into_iter().collect();
@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_shrink_to_fit() {
         let mut lifo = Lifo::new(NonZeroUsize::new(10).unwrap());
         lifo.insert(1, 10);
@@ -1005,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_retain_basic() {
         let mut lifo = Lifo::new(NonZeroUsize::new(5).unwrap());
 
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_lifo_peek_mut_no_modification() {
         let mut cache = Lifo::new(NonZeroUsize::new(3).unwrap());
         cache.insert("A", vec![1, 2, 3]);

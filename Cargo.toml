@@ -4,3 +4,7 @@ members = [
     "evictor",
     "fuzz",
 ]
+
+[profile.release-with-debug]
+inherits = "release"
+debug    = "full"

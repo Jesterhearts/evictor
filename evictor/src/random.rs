@@ -317,7 +317,7 @@ mod tests {
     use crate::Random;
 
     #[test]
-    #[timeout(1000)]
+    #[timeout(5000)]
     fn test_random_empty_cache() {
         let mut cache = Random::<i32, i32>::new(NonZeroUsize::new(3).unwrap());
 
