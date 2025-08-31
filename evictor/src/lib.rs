@@ -4,7 +4,6 @@
 #![forbid(unsafe_code)]
 
 mod lfu;
-mod linked_hashmap;
 mod lru;
 mod mru;
 mod queue;
@@ -13,27 +12,20 @@ mod random;
 mod r#ref;
 mod sieve;
 
-use std::{
-    hash::Hash,
-    num::NonZeroUsize,
-};
+use std::hash::Hash;
+use std::num::NonZeroUsize;
 
 pub use lfu::LfuPolicy;
 pub use lru::LruPolicy;
 pub use mru::MruPolicy;
-pub use queue::{
-    FifoPolicy,
-    LifoPolicy,
-};
+pub use queue::FifoPolicy;
+pub use queue::LifoPolicy;
 #[cfg(feature = "rand")]
 pub use random::RandomPolicy;
 pub use r#ref::Entry;
 pub use sieve::SievePolicy;
-
-use crate::linked_hashmap::{
-    LinkedHashMap,
-    Ptr,
-};
+use tether_map::Ptr;
+use tether_map::linked_hash_map::LinkedHashMap;
 
 #[cfg(not(feature = "ahash"))]
 type RandomState = std::hash::RandomState;
@@ -153,7 +145,7 @@ pub trait EntryValue<T>: private::Sealed {
 /// when creating a new cache. The default state should represent an empty
 /// cache with no entries.
 #[doc(hidden)]
-pub trait Metadata<T>: Default + private::Sealed {
+pub trait Metadata<T>: Default + private::Sealed + Clone {
     /// The entry type used by this policy to wrap cached values.
     type EntryType: EntryValue<T>;
 
@@ -191,7 +183,19 @@ pub trait Metadata<T>: Default + private::Sealed {
     /// - The cache is at capacity and a new entry needs to be inserted
     /// - The `pop()` method is called to explicitly remove the tail entry
     /// - The `tail()` method is called to inspect the next eviction candidate
-    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, Self::EntryType>) -> Ptr;
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &LinkedHashMap<K, Self::EntryType, RandomState>,
+    ) -> Option<Ptr>;
+
+    fn clone_from<K>(
+        &mut self,
+        other: &Self,
+        new_queue: &LinkedHashMap<K, Self::EntryType, RandomState>,
+    ) {
+        let _ = new_queue;
+        <Self as Clone>::clone_from(self, other);
+    }
 }
 
 /// Trait defining cache eviction policies.
@@ -256,7 +260,7 @@ pub trait Policy<T>: private::Sealed {
     type MetadataType: Metadata<T>;
 
     /// The iterator type returned by `into_iter()`.
-    type IntoIter<K>: Iterator<Item = (K, T)>;
+    type IntoIter<K: Hash + Eq>: Iterator<Item = (K, T)>;
 
     #[track_caller]
     fn insert_or_update_entry<K: Hash + Eq>(
@@ -264,7 +268,7 @@ pub trait Policy<T>: private::Sealed {
         make_room_on_insert: bool,
         get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> InsertionResult<K, T>;
 
     /// Updates the entry's position in the eviction order.
@@ -283,7 +287,7 @@ pub trait Policy<T>: private::Sealed {
     fn touch_entry<K: Hash + Eq>(
         ptr: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     );
 
     /// Evict the next entry from the cache. Returns the pointer to the next
@@ -293,9 +297,9 @@ pub trait Policy<T>: private::Sealed {
     #[track_caller]
     fn evict_entry<K: Hash + Eq>(
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)> {
-        let removed = metadata.candidate_removal_index(queue);
+        let removed = metadata.candidate_removal_index(queue)?;
         Self::remove_entry(removed, metadata, queue).1
     }
 
@@ -324,9 +328,9 @@ pub trait Policy<T>: private::Sealed {
     fn remove_entry<K: Hash + Eq>(
         ptr: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> (
-        Ptr,
+        Option<Ptr>,
         Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
     );
 
@@ -334,7 +338,7 @@ pub trait Policy<T>: private::Sealed {
     fn remove_key<K: Hash + Eq>(
         key: &K,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType>;
 
     /// Returns an iterator over the entries in the cache in eviction order.
@@ -362,7 +366,7 @@ pub trait Policy<T>: private::Sealed {
     /// An iterator yielding `(&Key, &Value)` pairs in eviction order
     fn iter<'q, K>(
         metadata: &'q Self::MetadataType,
-        queue: &'q LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &'q LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q;
@@ -394,9 +398,9 @@ pub trait Policy<T>: private::Sealed {
     /// An iterator that yields `(K, T)` pairs in the policy-specific eviction
     /// order. The iterator takes ownership of the cache contents, making
     /// this a consuming operation.
-    fn into_iter<K>(
+    fn into_iter<K: Hash + Eq>(
         metadata: Self::MetadataType,
-        queue: LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Self::IntoIter<K>;
 
     /// Converts the cache entries into an iterator of key-entry pairs in
@@ -426,9 +430,9 @@ pub trait Policy<T>: private::Sealed {
     /// entry metadata is needed
     ///
     /// For typical usage, prefer `into_iter()` which extracts just the values.
-    fn into_entries<K>(
+    fn into_entries<K: Hash + Eq>(
         metadata: Self::MetadataType,
-        queue: LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> impl Iterator<Item = (K, <Self::MetadataType as Metadata<T>>::EntryType)>;
 
     /// Validates the cache's internal state against the full set of kv pairs
@@ -438,7 +442,7 @@ pub trait Policy<T>: private::Sealed {
     #[doc(hidden)]
     fn debug_validate<K: Hash + Eq + std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) where
         T: std::fmt::Debug;
 }
@@ -1181,7 +1185,8 @@ impl Statistics {
 /// - Pre-allocates space for `capacity` entries to minimize reallocations
 /// - Automatically evicts entries when capacity is exceeded
 pub struct Cache<Key, Value, PolicyType: Policy<Value>> {
-    queue: LinkedHashMap<Key, <PolicyType::MetadataType as Metadata<Value>>::EntryType>,
+    queue:
+        LinkedHashMap<Key, <PolicyType::MetadataType as Metadata<Value>>::EntryType, RandomState>,
     capacity: NonZeroUsize,
     metadata: PolicyType::MetadataType,
 
@@ -1209,14 +1214,19 @@ impl<Key, Value, PolicyType: Policy<Value>> Clone for Cache<Key, Value, PolicyTy
 where
     Key: Clone + Hash + Eq,
     Value: Clone,
-    PolicyType::MetadataType: Clone,
     <PolicyType::MetadataType as Metadata<Value>>::EntryType: Clone,
 {
     fn clone(&self) -> Self {
+        let mut metadata = <PolicyType::MetadataType as Default>::default();
+        <PolicyType::MetadataType as Metadata<Value>>::clone_from(
+            &mut metadata,
+            &self.metadata,
+            &self.queue,
+        );
         Self {
             queue: self.queue.clone(),
+            metadata,
             capacity: self.capacity,
-            metadata: self.metadata.clone(),
             #[cfg(feature = "statistics")]
             statistics: self.statistics.clone(),
         }
@@ -1248,7 +1258,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// ```
     pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            queue: LinkedHashMap::with_capacity(capacity.get()),
+            queue: LinkedHashMap::with_capacity_and_hasher(capacity.get(), RandomState::default()),
             capacity,
             metadata: PolicyType::MetadataType::default(),
             #[cfg(feature = "statistics")]
@@ -1474,7 +1484,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(value, &"one".to_string());
     /// ```
     pub fn tail(&self) -> Option<(&Key, &Value)> {
-        let ptr = self.metadata.candidate_removal_index(&self.queue);
+        let ptr = self.metadata.candidate_removal_index(&self.queue)?;
         self.queue
             .ptr_get_entry(ptr)
             .map(|(key, value)| (key, value.value()))
@@ -1978,10 +1988,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - Avoid unnecessary allocations when the entry already exists
     ///
     /// ```rust
-    /// use std::{
-    ///     collections::HashMap,
-    ///     num::NonZeroUsize,
-    /// };
+    /// use std::collections::HashMap;
+    /// use std::num::NonZeroUsize;
     ///
     /// use evictor::Lru;
     ///
@@ -2301,7 +2309,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(cache.len(), 2); // One entry was evicted
     /// ```
     pub fn set_capacity(&mut self, capacity: NonZeroUsize) -> Vec<(Key, Value)> {
-        asssert!(capacity.get() as u32 < u32::MAX - 1, "Capacity too large");
+        assert!((capacity.get() as u32) < u32::MAX - 1, "Capacity too large");
         let mut evicted = Vec::with_capacity(self.queue.len().saturating_sub(capacity.get()));
         if capacity.get() < self.queue.len() {
             // If new capacity is smaller than current size, we need to evict
@@ -2768,9 +2776,16 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         let mut next = self.queue.head_cursor_mut();
         while let Some((k, v)) = next.current_mut() {
             if !f(k, v.value_mut()) {
-                let (ptr, _) =
-                    PolicyType::remove_entry(next.ptr(), &mut self.metadata, &mut self.queue);
-                next = self.queue.ptr_cursor_mut(ptr);
+                let (ptr, _) = PolicyType::remove_entry(
+                    next.ptr().unwrap(),
+                    &mut self.metadata,
+                    &mut self.queue,
+                );
+                if let Some(ptr) = ptr {
+                    next = self.queue.ptr_cursor_mut(ptr);
+                } else {
+                    break;
+                }
             } else {
                 next.move_next();
                 if next.at_head() {
@@ -2796,7 +2811,7 @@ impl<K: Hash + Eq + std::fmt::Debug, Value: std::fmt::Debug, PolicyType: Policy<
     }
 }
 
-impl<K, V, PolicyType: Policy<V>> IntoIterator for Cache<K, V, PolicyType> {
+impl<K: Hash + Eq, V, PolicyType: Policy<V>> IntoIterator for Cache<K, V, PolicyType> {
     type IntoIter = PolicyType::IntoIter<K>;
     type Item = (K, V);
 
@@ -2862,6 +2877,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
         let mut queue: LinkedHashMap<
             Key,
             <PolicyType::MetadataType as Metadata<Value>>::EntryType,
+            RandomState,
         > = LinkedHashMap::default();
         let mut metadata = PolicyType::MetadataType::default();
 
@@ -2957,10 +2973,8 @@ mod tests {
     fn test_lru_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            LruPolicy,
-        };
+        use crate::Cache;
+        use crate::LruPolicy;
 
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -2977,10 +2991,8 @@ mod tests {
     fn test_lfu_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            LfuPolicy,
-        };
+        use crate::Cache;
+        use crate::LfuPolicy;
 
         let mut cache = Cache::<i32, String, LfuPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -2997,10 +3009,8 @@ mod tests {
     fn test_mru_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            MruPolicy,
-        };
+        use crate::Cache;
+        use crate::MruPolicy;
         let mut cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
         cache.insert(2, "two".to_string());
@@ -3015,10 +3025,8 @@ mod tests {
     fn test_fifo_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            FifoPolicy,
-        };
+        use crate::Cache;
+        use crate::FifoPolicy;
 
         let mut cache = Cache::<i32, String, FifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3035,10 +3043,8 @@ mod tests {
     fn test_lifo_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            LifoPolicy,
-        };
+        use crate::Cache;
+        use crate::LifoPolicy;
 
         let mut cache = Cache::<i32, String, LifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3056,10 +3062,8 @@ mod tests {
     fn test_random_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            RandomPolicy,
-        };
+        use crate::Cache;
+        use crate::RandomPolicy;
 
         let mut cache = Cache::<i32, String, RandomPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3076,10 +3080,8 @@ mod tests {
     fn test_sieve_cache_clone() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            SievePolicy,
-        };
+        use crate::Cache;
+        use crate::SievePolicy;
 
         let mut cache = Cache::<i32, String, SievePolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3096,10 +3098,8 @@ mod tests {
     fn test_lfu_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            LfuPolicy,
-        };
+        use crate::Cache;
+        use crate::LfuPolicy;
 
         let mut cache = Cache::<i32, String, LfuPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3116,10 +3116,8 @@ mod tests {
     fn test_lru_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            LruPolicy,
-        };
+        use crate::Cache;
+        use crate::LruPolicy;
 
         let mut cache = Cache::<i32, String, LruPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3136,10 +3134,8 @@ mod tests {
     fn test_mru_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            MruPolicy,
-        };
+        use crate::Cache;
+        use crate::MruPolicy;
 
         let mut cache = Cache::<i32, String, MruPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3156,10 +3152,8 @@ mod tests {
     fn test_fifo_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            FifoPolicy,
-        };
+        use crate::Cache;
+        use crate::FifoPolicy;
 
         let mut cache = Cache::<i32, String, FifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3176,10 +3170,8 @@ mod tests {
     fn test_lifo_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            LifoPolicy,
-        };
+        use crate::Cache;
+        use crate::LifoPolicy;
 
         let mut cache = Cache::<i32, String, LifoPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3197,10 +3189,8 @@ mod tests {
     fn test_random_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            RandomPolicy,
-        };
+        use crate::Cache;
+        use crate::RandomPolicy;
 
         let mut cache = Cache::<i32, String, RandomPolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());
@@ -3217,10 +3207,8 @@ mod tests {
     fn test_sieve_cache_debug() {
         use std::num::NonZeroUsize;
 
-        use crate::{
-            Cache,
-            SievePolicy,
-        };
+        use crate::Cache;
+        use crate::SievePolicy;
 
         let mut cache = Cache::<i32, String, SievePolicy>::new(NonZeroUsize::new(3).unwrap());
         cache.insert(1, "one".to_string());

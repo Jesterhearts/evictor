@@ -1,23 +1,17 @@
-use std::{
-    hint::black_box,
-    num::NonZeroUsize,
-};
+use std::hint::black_box;
+use std::num::NonZeroUsize;
 
-use criterion::{
-    Criterion,
-    criterion_group,
-    criterion_main,
-};
+use criterion::Criterion;
+use criterion::criterion_group;
+use criterion::criterion_main;
+use evictor::Fifo;
+use evictor::Lfu;
+use evictor::Lifo;
+use evictor::Lru;
+use evictor::Mru;
 #[cfg(feature = "rand")]
 use evictor::Random;
-use evictor::{
-    Fifo,
-    Lfu,
-    Lifo,
-    Lru,
-    Mru,
-    Sieve,
-};
+use evictor::Sieve;
 
 macro_rules! bench_set {
     ($bench_set:ident, $cache:ident) => {

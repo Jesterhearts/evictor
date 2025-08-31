@@ -1,19 +1,21 @@
 macro_rules! impl_queue_policy {
     (($policy_name:ident, $entry_name:ident, $metadata_name:ident) => $insert:ident, $link:ident ) => {
-        use crate::{
-            EntryValue,
-            InsertOrUpdateAction,
-            InsertionResult,
-            Metadata,
-            Policy,
-            linked_hashmap::{
-                self,
-                LinkedHashMap,
-                Ptr,
-                RemovedEntry,
-            },
-            private,
+        use std::hash::Hash;
+
+        use tether_map::Ptr;
+        use tether_map::linked_hash_map::LinkedHashMap;
+        use tether_map::linked_hash_map::RemovedEntry;
+        use tether_map::linked_hash_map::{
+            self,
         };
+
+        use crate::EntryValue;
+        use crate::InsertOrUpdateAction;
+        use crate::InsertionResult;
+        use crate::Metadata;
+        use crate::Policy;
+        use crate::RandomState;
+        use crate::private;
 
         #[derive(Debug, Clone, Copy)]
         #[doc(hidden)]
@@ -56,24 +58,32 @@ macro_rules! impl_queue_policy {
         impl<T> Metadata<T> for $metadata_name {
             type EntryType = $entry_name<T>;
 
-            fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, $entry_name<T>>) -> Ptr {
+            fn candidate_removal_index<K>(
+                &self,
+                queue: &LinkedHashMap<K, $entry_name<T>, RandomState>,
+            ) -> Option<Ptr> {
                 queue.head_ptr()
             }
         }
 
         impl<T> Policy<T> for $policy_name {
-            type IntoIter<K> = IntoIter<K, T>;
+            type IntoIter<K: Hash + Eq> = IntoIter<K, T>;
             type MetadataType = $metadata_name;
 
+            #[inline]
             fn insert_or_update_entry<K: std::hash::Hash + Eq>(
                 key: K,
                 make_room_on_insert: bool,
                 get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
                 metadata: &mut Self::MetadataType,
-                queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+                queue: &mut LinkedHashMap<
+                    K,
+                    <Self::MetadataType as Metadata<T>>::EntryType,
+                    RandomState,
+                >,
             ) -> InsertionResult<K, T> {
                 match queue.entry(key) {
-                    linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+                    linked_hash_map::Entry::Occupied(mut occupied_entry) => {
                         let ptr = occupied_entry.ptr();
                         match get_value(occupied_entry.key(), false) {
                             InsertOrUpdateAction::NoInsert(_) => {
@@ -90,7 +100,7 @@ macro_rules! impl_queue_policy {
                             }
                         }
                     }
-                    linked_hashmap::Entry::Vacant(vacant_entry) => {
+                    linked_hash_map::Entry::Vacant(vacant_entry) => {
                         let value = match get_value(vacant_entry.key(), true) {
                             InsertOrUpdateAction::NoInsert(value) => {
                                 return InsertionResult::NotFoundNoInsert(
@@ -104,50 +114,66 @@ macro_rules! impl_queue_policy {
                             InsertOrUpdateAction::InsertOrUpdate(value) => value,
                         };
                         let ptr = if make_room_on_insert {
-                            let ptr = vacant_entry.push_unlinked($entry_name::new(value));
+                            let ptr = vacant_entry.insert_unlinked($entry_name::new(value)).0;
                             Self::evict_entry(metadata, queue);
                             $link!(queue, ptr);
                             ptr
                         } else {
-                            $insert!(vacant_entry, $entry_name::new(value))
+                            $insert!(vacant_entry, $entry_name::new(value)).0
                         };
                         InsertionResult::Inserted(ptr)
                     }
                 }
             }
 
+            #[inline]
             fn touch_entry<K: std::hash::Hash + Eq>(
                 _: Ptr,
                 _: &mut Self::MetadataType,
-                _: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+                _: &mut LinkedHashMap<
+                    K,
+                    <Self::MetadataType as Metadata<T>>::EntryType,
+                    RandomState,
+                >,
             ) {
             }
 
+            #[inline]
             fn remove_entry<K: std::hash::Hash + Eq>(
                 ptr: Ptr,
                 _: &mut Self::MetadataType,
-                queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
-            ) -> (Ptr, Option<(K, $entry_name<T>)>) {
+                queue: &mut LinkedHashMap<
+                    K,
+                    <Self::MetadataType as Metadata<T>>::EntryType,
+                    RandomState,
+                >,
+            ) -> (Option<Ptr>, Option<(K, $entry_name<T>)>) {
                 let Some(RemovedEntry {
                     key, value, next, ..
                 }) = queue.remove_ptr(ptr)
                 else {
-                    return (Ptr::null(), None);
+                    return (None, None);
                 };
                 (next, Some((key, value)))
             }
 
+            #[inline]
             fn remove_key<K: std::hash::Hash + Eq>(
                 key: &K,
                 _: &mut Self::MetadataType,
-                queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+                queue: &mut LinkedHashMap<
+                    K,
+                    <Self::MetadataType as Metadata<T>>::EntryType,
+                    RandomState,
+                >,
             ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
-                queue.remove(key).map(|removed| removed.1.value)
+                queue.remove(key)
             }
 
+            #[inline]
             fn iter<'q, K>(
                 _: &'q Self::MetadataType,
-                queue: &'q LinkedHashMap<K, $entry_name<T>>,
+                queue: &'q LinkedHashMap<K, $entry_name<T>, RandomState>,
             ) -> impl Iterator<Item = (&'q K, &'q T)>
             where
                 T: 'q,
@@ -155,36 +181,38 @@ macro_rules! impl_queue_policy {
                 queue.iter().map(move |(k, v)| (k, v.value()))
             }
 
-            fn into_iter<K>(
+            #[inline]
+            fn into_iter<K: Hash + Eq>(
                 _: Self::MetadataType,
-                queue: LinkedHashMap<K, $entry_name<T>>,
+                queue: LinkedHashMap<K, $entry_name<T>, RandomState>,
             ) -> Self::IntoIter<K> {
                 IntoIter {
                     inner: queue.into_iter(),
                 }
             }
 
+            #[inline]
             fn into_entries<K>(
                 _: Self::MetadataType,
-                queue: LinkedHashMap<K, $entry_name<T>>,
+                queue: LinkedHashMap<K, $entry_name<T>, RandomState>,
             ) -> impl Iterator<Item = (K, $entry_name<T>)> {
                 queue.into_iter()
             }
 
             #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+            #[inline]
             fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
                 _: &Self::MetadataType,
-                queue: &LinkedHashMap<K, $entry_name<T>>,
+                _: &LinkedHashMap<K, $entry_name<T>, RandomState>,
             ) where
                 T: std::fmt::Debug,
             {
-                queue.debug_validate();
             }
         }
 
         #[doc(hidden)]
         pub struct IntoIter<K, T> {
-            inner: linked_hashmap::IntoIter<K, $entry_name<T>>,
+            inner: linked_hash_map::IntoIter<K, $entry_name<T>>,
         }
 
         impl<K, T> Iterator for IntoIter<K, T> {
@@ -243,10 +271,8 @@ mod tests {
 
     use ntest::timeout;
 
-    use crate::{
-        Fifo,
-        Lifo,
-    };
+    use crate::Fifo;
+    use crate::Lifo;
 
     #[test]
     #[timeout(5000)]

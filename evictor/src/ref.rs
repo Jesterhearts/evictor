@@ -1,17 +1,12 @@
-use std::{
-    hash::Hash,
-    ops::{
-        Deref,
-        DerefMut,
-    },
-};
+use std::hash::Hash;
+use std::ops::Deref;
+use std::ops::DerefMut;
 
-use crate::{
-    Cache,
-    EntryValue,
-    Policy,
-    linked_hashmap::Ptr,
-};
+use tether_map::Ptr;
+
+use crate::Cache;
+use crate::EntryValue;
+use crate::Policy;
 
 /// A smart reference to a cached value that tracks modifications.
 ///
@@ -128,6 +123,7 @@ pub struct Entry<'c, K: Hash + Eq, V, P: Policy<V>> {
 }
 
 impl<K: Hash + Eq, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
+    #[inline]
     fn drop(&mut self) {
         if self.dirty {
             P::touch_entry(self.ptr, &mut self.cache.metadata, &mut self.cache.queue);
@@ -141,12 +137,14 @@ impl<K: Hash + Eq, V, P: Policy<V>> Drop for Entry<'_, K, V, P> {
 }
 
 impl<K: Hash + Eq, V, P: Policy<V>> AsRef<V> for Entry<'_, K, V, P> {
+    #[inline]
     fn as_ref(&self) -> &V {
         self.cache.queue[self.ptr].value()
     }
 }
 
 impl<K: Hash + Eq, V, P: Policy<V>> AsMut<V> for Entry<'_, K, V, P> {
+    #[inline]
     fn as_mut(&mut self) -> &mut V {
         self.dirty = true;
         self.cache.queue[self.ptr].value_mut()
@@ -156,12 +154,14 @@ impl<K: Hash + Eq, V, P: Policy<V>> AsMut<V> for Entry<'_, K, V, P> {
 impl<K: Hash + Eq, V, P: Policy<V>> Deref for Entry<'_, K, V, P> {
     type Target = V;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.cache.queue[self.ptr].value()
     }
 }
 
 impl<K: Hash + Eq, V, P: Policy<V>> DerefMut for Entry<'_, K, V, P> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.dirty = true;
         self.cache.queue[self.ptr].value_mut()
@@ -169,6 +169,7 @@ impl<K: Hash + Eq, V, P: Policy<V>> DerefMut for Entry<'_, K, V, P> {
 }
 
 impl<'q, K: Hash + Eq, V, P: Policy<V>> Entry<'q, K, V, P> {
+    #[inline]
     pub(crate) fn new(ptr: Ptr, key: &'q K, cache: &'q mut Cache<K, V, P>) -> Self {
         Self {
             key,
@@ -206,6 +207,7 @@ impl<K: Hash + Eq, V, P: Policy<V>> Entry<'_, K, V, P> {
     ///     // Key access doesn't mark entry as dirty
     /// }
     /// ```
+    #[inline]
     pub fn key(&self) -> &K {
         self.key
     }
@@ -245,6 +247,7 @@ impl<K: Hash + Eq, V, P: Policy<V>> Entry<'_, K, V, P> {
     /// ```
     ///
     /// [`value_mut()`]: Entry::value_mut
+    #[inline]
     pub fn value(&self) -> &V {
         self.cache.queue[self.ptr].value()
     }
@@ -325,6 +328,7 @@ impl<K: Hash + Eq, V, P: Policy<V>> Entry<'_, K, V, P> {
     /// ```
     ///
     /// [`value()`]: Entry::value
+    #[inline]
     pub fn value_mut(&mut self) -> &mut V {
         self.dirty = true;
         self.cache.queue[self.ptr].value_mut()

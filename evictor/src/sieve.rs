@@ -1,22 +1,20 @@
-use std::{
-    collections::VecDeque,
-    hash::Hash,
+use std::collections::VecDeque;
+use std::hash::Hash;
+
+use tether_map::Ptr;
+use tether_map::linked_hash_map::LinkedHashMap;
+use tether_map::linked_hash_map::RemovedEntry;
+use tether_map::linked_hash_map::{
+    self,
 };
 
-use crate::{
-    EntryValue,
-    InsertOrUpdateAction,
-    InsertionResult,
-    Metadata,
-    Policy,
-    linked_hashmap::{
-        self,
-        LinkedHashMap,
-        Ptr,
-        RemovedEntry,
-    },
-    private,
-};
+use crate::EntryValue;
+use crate::InsertOrUpdateAction;
+use crate::InsertionResult;
+use crate::Metadata;
+use crate::Policy;
+use crate::RandomState;
+use crate::private;
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
@@ -26,7 +24,7 @@ impl private::Sealed for SievePolicy {}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SieveMetadata {
-    hand: Ptr,
+    hand: Option<Ptr>,
 }
 
 impl private::Sealed for SieveMetadata {}
@@ -34,19 +32,27 @@ impl private::Sealed for SieveMetadata {}
 impl<Value> Metadata<Value> for SieveMetadata {
     type EntryType = SieveEntry<Value>;
 
-    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, SieveEntry<Value>>) -> Ptr {
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &LinkedHashMap<K, SieveEntry<Value>, RandomState>,
+    ) -> Option<Ptr> {
         if queue.is_empty() {
-            return Ptr::default();
+            return None;
         }
 
         let mut visited = vec![true; queue.len()];
-        let mut hand = self.hand;
-        while queue[hand].visited && visited[queue.ptr_index_unstable(hand).unwrap_or_default()] {
-            visited[queue.ptr_index_unstable(hand).unwrap_or_default()] = false;
-            hand = queue.prev_ptr(hand).unwrap_or(queue.tail_ptr());
+        let mut index = 0;
+        let mut hand = self.hand.unwrap();
+        while queue[hand].visited && visited[index] {
+            visited[index] = false;
+            hand = queue.prev_ptr(hand).unwrap();
+            index += 1;
+            if index == queue.len() {
+                index = 0;
+            }
         }
 
-        hand
+        Some(hand)
     }
 }
 
@@ -80,18 +86,23 @@ impl<Value> EntryValue<Value> for SieveEntry<Value> {
 }
 
 impl<Value> Policy<Value> for SievePolicy {
-    type IntoIter<K> = IntoIter<K, Value>;
+    type IntoIter<K: Hash + Eq> = IntoIter<K, Value>;
     type MetadataType = SieveMetadata;
 
+    #[inline]
     fn insert_or_update_entry<K: Hash + Eq>(
         key: K,
         make_room_on_insert: bool,
         get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<Value>,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<Value>>::EntryType>,
+        queue: &mut LinkedHashMap<
+            K,
+            <Self::MetadataType as Metadata<Value>>::EntryType,
+            RandomState,
+        >,
     ) -> InsertionResult<K, Value> {
         match queue.entry(key) {
-            linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+            linked_hash_map::Entry::Occupied(mut occupied_entry) => {
                 let ptr = occupied_entry.ptr();
                 match get_value(occupied_entry.key(), false) {
                     InsertOrUpdateAction::TouchNoUpdate => {
@@ -110,7 +121,7 @@ impl<Value> Policy<Value> for SievePolicy {
                     }
                 }
             }
-            linked_hashmap::Entry::Vacant(vacant_entry) => {
+            linked_hash_map::Entry::Vacant(vacant_entry) => {
                 let value = match get_value(vacant_entry.key(), true) {
                     InsertOrUpdateAction::TouchNoUpdate => {
                         unreachable!("Cache miss should not return TouchNoUpdate")
@@ -121,47 +132,57 @@ impl<Value> Policy<Value> for SievePolicy {
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
                 let ptr = if make_room_on_insert {
-                    let ptr = vacant_entry.push_unlinked(SieveEntry::new(value));
+                    let ptr = vacant_entry.insert_unlinked(SieveEntry::new(value)).0;
                     Self::evict_entry(metadata, queue);
                     queue.link_as_head(ptr);
                     ptr
                 } else {
-                    vacant_entry.insert_head(SieveEntry::new(value))
+                    vacant_entry.insert_head(SieveEntry::new(value)).0
                 };
-                if metadata.hand == Ptr::default() {
-                    metadata.hand = ptr;
+                if metadata.hand.is_none() {
+                    metadata.hand = Some(ptr);
                 }
                 InsertionResult::Inserted(ptr)
             }
         }
     }
 
+    #[inline]
     fn touch_entry<K: std::hash::Hash + Eq>(
         ptr: Ptr,
         _: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<Value>>::EntryType>,
+        queue: &mut LinkedHashMap<
+            K,
+            <Self::MetadataType as Metadata<Value>>::EntryType,
+            RandomState,
+        >,
     ) {
         queue[ptr].visited = true;
     }
 
     fn evict_entry<K: Hash + Eq>(
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, SieveEntry<Value>>,
+        queue: &mut LinkedHashMap<K, SieveEntry<Value>, RandomState>,
     ) -> Option<(K, SieveEntry<Value>)> {
         if queue.is_empty() {
             return None;
         }
 
         move_hand_to_eviction_index(metadata, queue);
-        Self::remove_entry(metadata.hand, metadata, queue).1
+        Self::remove_entry(metadata.hand.unwrap(), metadata, queue).1
     }
 
+    #[inline]
     fn remove_entry<K: Hash + Eq>(
         ptr: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<Value>>::EntryType>,
+        queue: &mut LinkedHashMap<
+            K,
+            <Self::MetadataType as Metadata<Value>>::EntryType,
+            RandomState,
+        >,
     ) -> (
-        Ptr,
+        Option<Ptr>,
         Option<(K, <Self::MetadataType as Metadata<Value>>::EntryType)>,
     ) {
         let Some(RemovedEntry {
@@ -172,29 +193,35 @@ impl<Value> Policy<Value> for SievePolicy {
             ..
         }) = queue.remove_ptr(ptr)
         else {
-            return (Ptr::null(), None);
+            return (None, None);
         };
-        if ptr == metadata.hand {
+        if Some(ptr) == metadata.hand {
             metadata.hand = prev;
         }
         (next, Some((key, value)))
     }
 
+    #[inline]
     fn remove_key<K: Hash + Eq>(
         key: &K,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<Value>>::EntryType>,
+        queue: &mut LinkedHashMap<
+            K,
+            <Self::MetadataType as Metadata<Value>>::EntryType,
+            RandomState,
+        >,
     ) -> Option<<Self::MetadataType as Metadata<Value>>::EntryType> {
-        let (ptr, removed) = queue.remove(key)?;
-        if ptr == metadata.hand {
+        let (ptr, removed) = queue.remove_full(key)?;
+        if Some(ptr) == metadata.hand {
             metadata.hand = removed.prev;
         }
         Some(removed.value)
     }
 
+    #[inline]
     fn iter<'q, K>(
         metadata: &'q Self::MetadataType,
-        queue: &'q LinkedHashMap<K, SieveEntry<Value>>,
+        queue: &'q LinkedHashMap<K, SieveEntry<Value>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q Value)>
     where
         Value: 'q,
@@ -203,13 +230,13 @@ impl<Value> Policy<Value> for SievePolicy {
             return Iter {
                 queue,
                 skipped: VecDeque::new(),
-                index: Ptr::default(),
+                index: None,
                 seen_count: 0,
             };
         }
 
         let mut skipped = VecDeque::new();
-        let mut index = metadata.hand;
+        let mut index = metadata.hand.unwrap();
 
         let mut entry = queue.ptr_get(index).expect("Hand pointer invalid");
         while entry.visited {
@@ -220,67 +247,74 @@ impl<Value> Policy<Value> for SievePolicy {
                     queue,
                     seen_count: skipped.len(),
                     skipped,
-                    index: Ptr::default(),
+                    index: None,
                 };
             }
 
-            index = queue.prev_ptr(index).unwrap_or(queue.tail_ptr());
+            index = queue.prev_ptr(index).unwrap();
             entry = queue.ptr_get(index).unwrap();
         }
 
         Iter {
-            index,
+            index: Some(index),
             queue,
             seen_count: skipped.len(),
             skipped,
         }
     }
 
-    fn into_iter<K>(
+    #[inline]
+    fn into_iter<K: Hash + Eq>(
         metadata: Self::MetadataType,
-        queue: LinkedHashMap<K, SieveEntry<Value>>,
+        queue: LinkedHashMap<K, SieveEntry<Value>, RandomState>,
     ) -> Self::IntoIter<K> {
         IntoIter {
             inner: build_into_entries_iter(metadata, queue),
         }
     }
 
-    fn into_entries<K>(
+    #[inline]
+    fn into_entries<K: Hash + Eq>(
         metadata: Self::MetadataType,
-        queue: LinkedHashMap<K, SieveEntry<Value>>,
+        queue: LinkedHashMap<K, SieveEntry<Value>, RandomState>,
     ) -> impl Iterator<Item = (K, SieveEntry<Value>)> {
         build_into_entries_iter(metadata, queue)
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    #[inline]
     fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
         _: &Self::MetadataType,
-        queue: &LinkedHashMap<K, SieveEntry<Value>>,
+        _: &LinkedHashMap<K, SieveEntry<Value>, RandomState>,
     ) where
         Value: std::fmt::Debug,
     {
-        queue.debug_validate();
     }
 }
 
 fn move_hand_to_eviction_index<K, Value>(
     metadata: &mut SieveMetadata,
-    queue: &mut LinkedHashMap<K, SieveEntry<Value>>,
+    queue: &mut LinkedHashMap<K, SieveEntry<Value>, RandomState>,
 ) {
-    while queue[metadata.hand].visited {
-        queue[metadata.hand].visited = false;
-        metadata.hand = queue.prev_ptr(metadata.hand).unwrap_or(queue.tail_ptr());
+    while queue[metadata.hand.unwrap()].visited {
+        queue[metadata.hand.unwrap()].visited = false;
+        metadata.hand = queue.prev_ptr(metadata.hand.unwrap());
     }
-    debug_assert!(!queue[metadata.hand].visited);
+    debug_assert!(!queue[metadata.hand.unwrap()].visited);
 }
 
-fn build_into_entries_iter<K, Value>(
+fn build_into_entries_iter<K: Hash + Eq, Value>(
     metadata: SieveMetadata,
-    mut queue: LinkedHashMap<K, SieveEntry<Value>>,
+    mut queue: LinkedHashMap<K, SieveEntry<Value>, RandomState>,
 ) -> IntoEntriesIter<K, Value> {
     let mut skipped: VecDeque<(K, SieveEntry<Value>)> = VecDeque::new();
 
-    if queue.ptr_get(metadata.hand).is_none_or(|e| !e.visited) {
+    if queue.len() == 1
+        || metadata
+            .hand
+            .and_then(|hand| queue.ptr_get(hand))
+            .is_none_or(|e| !e.visited)
+    {
         return IntoEntriesIter {
             skipped,
             queue,
@@ -289,9 +323,9 @@ fn build_into_entries_iter<K, Value>(
     }
 
     let mut entry = queue
-        .remove_ptr(metadata.hand)
+        .remove_ptr(metadata.hand.unwrap())
         .expect("Hand pointer invalid");
-    let mut index = entry.prev.or(queue.tail_ptr());
+    let mut index = entry.prev.unwrap();
     loop {
         skipped.push_back((entry.key, entry.value));
 
@@ -299,22 +333,22 @@ fn build_into_entries_iter<K, Value>(
             break;
         };
         entry = e;
-        index = entry.prev.or(queue.tail_ptr());
+        index = entry.prev.unwrap();
     }
 
     IntoEntriesIter {
         skipped,
-        index,
+        index: Some(index),
         queue,
     }
 }
 
 #[derive(Debug, Clone)]
 struct Iter<'q, K, T> {
-    queue: &'q LinkedHashMap<K, SieveEntry<T>>,
+    queue: &'q LinkedHashMap<K, SieveEntry<T>, RandomState>,
     skipped: VecDeque<Ptr>,
     seen_count: usize,
-    index: Ptr,
+    index: Option<Ptr>,
 }
 
 impl<'q, K, T> Iterator for Iter<'q, K, T> {
@@ -322,30 +356,24 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.seen_count != self.queue.len()
-            && let Some((mut key, mut entry)) = self.queue.ptr_get_entry(self.index)
+            && let Some((mut key, mut entry)) = self.queue.ptr_get_entry(self.index?)
         {
             while entry.visited {
                 self.seen_count += 1;
-                self.skipped.push_back(self.index);
+                self.skipped.push_back(self.index?);
                 if self.seen_count == self.queue.len() {
-                    self.index = Ptr::default();
+                    self.index = None;
                     break;
                 }
-                self.index = self
-                    .queue
-                    .prev_ptr(self.index)
-                    .unwrap_or(self.queue.tail_ptr());
-                let (k, e) = self.queue.ptr_get_entry(self.index).unwrap();
+                self.index = self.queue.prev_ptr(self.index?);
+                let (k, e) = self.queue.ptr_get_entry(self.index?).unwrap();
                 key = k;
                 entry = e;
             }
 
             if !entry.visited {
                 self.seen_count += 1;
-                self.index = self
-                    .queue
-                    .prev_ptr(self.index)
-                    .unwrap_or(self.queue.tail_ptr());
+                self.index = self.queue.prev_ptr(self.index?);
                 return Some((key, &entry.value));
             }
         }
@@ -361,15 +389,15 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
 #[doc(hidden)]
 struct IntoEntriesIter<K, T> {
     skipped: VecDeque<(K, SieveEntry<T>)>,
-    queue: LinkedHashMap<K, SieveEntry<T>>,
-    index: Ptr,
+    queue: LinkedHashMap<K, SieveEntry<T>, RandomState>,
+    index: Option<Ptr>,
 }
 
-impl<K, V> Iterator for IntoEntriesIter<K, V> {
+impl<K: Hash + Eq, V> Iterator for IntoEntriesIter<K, V> {
     type Item = (K, SieveEntry<V>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(mut entry) = self.queue.remove_ptr(self.index) {
+        if let Some(mut entry) = self.index.and_then(|index| self.queue.remove_ptr(index)) {
             self.index = entry.prev.or(self.queue.tail_ptr());
 
             if !entry.value.visited {
@@ -378,7 +406,7 @@ impl<K, V> Iterator for IntoEntriesIter<K, V> {
 
             loop {
                 self.skipped.push_back((entry.key, entry.value));
-                let Some(e) = self.queue.remove_ptr(self.index) else {
+                let Some(e) = self.index.and_then(|index| self.queue.remove_ptr(index)) else {
                     break;
                 };
                 self.index = e.prev.or(self.queue.tail_ptr());
@@ -399,7 +427,7 @@ pub struct IntoIter<K, T> {
     inner: IntoEntriesIter<K, T>,
 }
 
-impl<K, V> Iterator for IntoIter<K, V> {
+impl<K: Hash + Eq, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -409,10 +437,8 @@ impl<K, V> Iterator for IntoIter<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        num::NonZeroUsize,
-    };
+    use std::collections::HashSet;
+    use std::num::NonZeroUsize;
 
     use ntest::timeout;
 

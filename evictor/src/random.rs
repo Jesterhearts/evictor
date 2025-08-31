@@ -1,20 +1,22 @@
+use std::hash::Hash;
+
+use indexmap::IndexSet;
 #[cfg(debug_assertions)]
 use rand::seq::SliceRandom;
-
-use crate::{
-    EntryValue,
-    InsertOrUpdateAction,
-    InsertionResult,
-    Metadata,
-    Policy,
-    linked_hashmap::{
-        self,
-        LinkedHashMap,
-        Ptr,
-        RemovedEntry,
-    },
-    private,
+use tether_map::Ptr;
+use tether_map::linked_hash_map::LinkedHashMap;
+use tether_map::linked_hash_map::RemovedEntry;
+use tether_map::linked_hash_map::{
+    self,
 };
+
+use crate::EntryValue;
+use crate::InsertOrUpdateAction;
+use crate::InsertionResult;
+use crate::Metadata;
+use crate::Policy;
+use crate::RandomState;
+use crate::private;
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
@@ -48,36 +50,67 @@ impl<Value> EntryValue<Value> for RandomEntry<Value> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 #[doc(hidden)]
-pub struct RandomMetadata;
+pub struct RandomMetadata {
+    ptrs: IndexSet<Ptr>,
+}
 
 impl private::Sealed for RandomMetadata {}
 
 impl<T> Metadata<T> for RandomMetadata {
     type EntryType = RandomEntry<T>;
 
-    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, RandomEntry<T>>) -> Ptr {
-        queue
-            .index_ptr_unstable(rand::random_range(0..queue.len().max(1)))
-            .unwrap_or_default()
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &LinkedHashMap<K, RandomEntry<T>, RandomState>,
+    ) -> Option<Ptr> {
+        if queue.is_empty() {
+            return None;
+        }
+        self.ptrs
+            .get_index(rand::random_range(0..self.ptrs.len()))
+            .copied()
+    }
+
+    fn clone_from<K>(
+        &mut self,
+        _: &Self,
+        new_queue: &LinkedHashMap<K, Self::EntryType, RandomState>,
+    ) {
+        self.ptrs.clear();
+        let Some(mut cursor) = new_queue.head_ptr() else {
+            return;
+        };
+
+        loop {
+            self.ptrs.insert(cursor);
+            let Some(next) = new_queue
+                .next_ptr(cursor)
+                .filter(|next| Some(*next) != new_queue.head_ptr())
+            else {
+                break;
+            };
+            cursor = next;
+        }
     }
 }
 
 impl<T> Policy<T> for RandomPolicy {
-    type IntoIter<K> = IntoIter<K, T>;
+    type IntoIter<K: Hash + Eq> = IntoIter<K, T>;
     type MetadataType = RandomMetadata;
 
+    #[inline]
     fn insert_or_update_entry<K: std::hash::Hash + Eq>(
         key: K,
         make_room_on_insert: bool,
         get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> InsertionResult<K, T> {
         let would_evict = metadata.candidate_removal_index(queue);
         match queue.entry(key) {
-            linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+            linked_hash_map::Entry::Occupied(mut occupied_entry) => {
                 let ptr = occupied_entry.ptr();
                 match get_value(occupied_entry.key(), false) {
                     InsertOrUpdateAction::NoInsert(_) => {
@@ -93,7 +126,7 @@ impl<T> Policy<T> for RandomPolicy {
                     }
                 }
             }
-            linked_hashmap::Entry::Vacant(vacant_entry) => {
+            linked_hash_map::Entry::Vacant(vacant_entry) => {
                 let value = match get_value(vacant_entry.key(), true) {
                     InsertOrUpdateAction::TouchNoUpdate => {
                         unreachable!("Cache miss should not return TouchNoUpdate");
@@ -104,52 +137,58 @@ impl<T> Policy<T> for RandomPolicy {
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
                 let ptr = if make_room_on_insert {
-                    let ptr = vacant_entry.insert_tail(RandomEntry::new(value));
-                    Self::remove_entry(would_evict, metadata, queue);
+                    let ptr = vacant_entry.insert_tail(RandomEntry::new(value)).0;
+                    Self::remove_entry(would_evict.unwrap(), metadata, queue);
+                    metadata.ptrs.swap_remove(&would_evict.unwrap());
                     ptr
                 } else {
-                    vacant_entry.insert_tail(RandomEntry::new(value))
+                    vacant_entry.insert_tail(RandomEntry::new(value)).0
                 };
+                metadata.ptrs.insert(ptr);
                 InsertionResult::Inserted(ptr)
             }
         }
     }
 
+    #[inline]
     fn touch_entry<K: std::hash::Hash + Eq>(
         _: Ptr,
         _: &mut Self::MetadataType,
-        _: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        _: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) {
     }
 
+    #[inline]
     fn remove_entry<K: std::hash::Hash + Eq>(
         ptr: Ptr,
         _: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> (
-        Ptr,
+        Option<Ptr>,
         Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
     ) {
         let Some(RemovedEntry {
             key, value, next, ..
         }) = queue.remove_ptr(ptr)
         else {
-            return (Ptr::null(), None);
+            return (None, None);
         };
         (next, Some((key, value)))
     }
 
+    #[inline]
     fn remove_key<K: std::hash::Hash + Eq>(
         key: &K,
         _: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
-        queue.remove(key).map(|removed| removed.1.value)
+        queue.remove(key)
     }
 
+    #[inline]
     fn iter<'q, K>(
-        _metadata: &'q Self::MetadataType,
-        queue: &'q LinkedHashMap<K, RandomEntry<T>>,
+        metadata: &'q Self::MetadataType,
+        queue: &'q LinkedHashMap<K, RandomEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
@@ -166,13 +205,15 @@ impl<T> Policy<T> for RandomPolicy {
             index: 0,
             #[cfg(debug_assertions)]
             order,
+            index_to_ptr: &metadata.ptrs,
             queue,
         }
     }
 
-    fn into_iter<K>(
+    #[inline]
+    fn into_iter<K: Hash + Eq>(
         _metadata: Self::MetadataType,
-        queue: LinkedHashMap<K, RandomEntry<T>>,
+        queue: LinkedHashMap<K, RandomEntry<T>, RandomState>,
     ) -> Self::IntoIter<K> {
         #[cfg(debug_assertions)]
         let mut order = (0..queue.len()).collect::<Vec<_>>();
@@ -190,9 +231,10 @@ impl<T> Policy<T> for RandomPolicy {
         }
     }
 
+    #[inline]
     fn into_entries<K>(
         _metadata: Self::MetadataType,
-        queue: LinkedHashMap<K, RandomEntry<T>>,
+        queue: LinkedHashMap<K, RandomEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (K, RandomEntry<T>)> {
         #[cfg(debug_assertions)]
         let mut order = (0..queue.len()).collect::<Vec<_>>();
@@ -211,9 +253,10 @@ impl<T> Policy<T> for RandomPolicy {
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    #[inline]
     fn debug_validate<K: std::hash::Hash + Eq>(
         _: &Self::MetadataType,
-        _: &LinkedHashMap<K, RandomEntry<T>>,
+        _: &LinkedHashMap<K, RandomEntry<T>, RandomState>,
     ) {
         // Nothing to do
     }
@@ -222,7 +265,8 @@ impl<T> Policy<T> for RandomPolicy {
 struct Iter<'q, K, T> {
     #[cfg(debug_assertions)]
     order: Vec<usize>,
-    queue: &'q LinkedHashMap<K, RandomEntry<T>>,
+    index_to_ptr: &'q IndexSet<Ptr>,
+    queue: &'q LinkedHashMap<K, RandomEntry<T>, RandomState>,
     index: usize,
 }
 
@@ -231,7 +275,7 @@ impl<'q, K, T> Iterator for Iter<'q, K, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index < self.queue.len() {
-            let ptr = self.queue.index_ptr_unstable(self.index)?;
+            let ptr = self.index_to_ptr.get_index(self.index).copied()?;
             #[cfg(debug_assertions)]
             {
                 self.index = self.order.pop().unwrap_or(self.queue.len());

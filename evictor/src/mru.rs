@@ -1,17 +1,19 @@
-use crate::{
-    EntryValue,
-    InsertOrUpdateAction,
-    InsertionResult,
-    Metadata,
-    Policy,
-    linked_hashmap::{
-        self,
-        LinkedHashMap,
-        Ptr,
-        RemovedEntry,
-    },
-    private,
+use std::hash::Hash;
+
+use tether_map::Ptr;
+use tether_map::linked_hash_map::LinkedHashMap;
+use tether_map::linked_hash_map::RemovedEntry;
+use tether_map::linked_hash_map::{
+    self,
 };
+
+use crate::EntryValue;
+use crate::InsertOrUpdateAction;
+use crate::InsertionResult;
+use crate::Metadata;
+use crate::Policy;
+use crate::RandomState;
+use crate::private;
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
@@ -31,7 +33,10 @@ impl private::Sealed for MruMetadata {}
 impl<T> Metadata<T> for MruMetadata {
     type EntryType = MruEntry<T>;
 
-    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, MruEntry<T>>) -> Ptr {
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &LinkedHashMap<K, MruEntry<T>, RandomState>,
+    ) -> Option<Ptr> {
         queue.head_ptr()
     }
 }
@@ -63,18 +68,19 @@ impl<T> EntryValue<T> for MruEntry<T> {
 }
 
 impl<T> Policy<T> for MruPolicy {
-    type IntoIter<K> = IntoIter<K, T>;
+    type IntoIter<K: Hash + Eq> = IntoIter<K, T>;
     type MetadataType = MruMetadata;
 
+    #[inline]
     fn insert_or_update_entry<K: std::hash::Hash + Eq>(
         key: K,
         make_room_on_insert: bool,
         get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> InsertionResult<K, T> {
         match queue.entry(key) {
-            linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+            linked_hash_map::Entry::Occupied(mut occupied_entry) => {
                 let ptr = occupied_entry.ptr();
                 match get_value(occupied_entry.key(), false) {
                     InsertOrUpdateAction::InsertOrUpdate(value) => {
@@ -91,7 +97,7 @@ impl<T> Policy<T> for MruPolicy {
                     }
                 }
             }
-            linked_hashmap::Entry::Vacant(vacant_entry) => {
+            linked_hash_map::Entry::Vacant(vacant_entry) => {
                 let value = match get_value(vacant_entry.key(), true) {
                     InsertOrUpdateAction::TouchNoUpdate => {
                         unreachable!("Cache miss should not return TouchNoUpdate");
@@ -103,12 +109,12 @@ impl<T> Policy<T> for MruPolicy {
                 };
 
                 let ptr = if make_room_on_insert {
-                    let ptr = vacant_entry.push_unlinked(MruEntry::new(value));
+                    let ptr = vacant_entry.insert_unlinked(MruEntry::new(value)).0;
                     Self::evict_entry(metadata, queue);
                     queue.link_as_head(ptr);
                     ptr
                 } else {
-                    vacant_entry.insert_head(MruEntry::new(value))
+                    vacant_entry.insert_head(MruEntry::new(value)).0
                 };
 
                 InsertionResult::Inserted(ptr)
@@ -116,42 +122,46 @@ impl<T> Policy<T> for MruPolicy {
         }
     }
 
+    #[inline]
     fn touch_entry<K: std::hash::Hash + Eq>(
         ptr: Ptr,
         _: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) {
         queue.move_to_head(ptr);
     }
 
+    #[inline]
     fn remove_entry<K: std::hash::Hash + Eq>(
         ptr: Ptr,
         _: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> (
-        Ptr,
+        Option<Ptr>,
         Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
     ) {
         let Some(RemovedEntry {
             key, value, next, ..
         }) = queue.remove_ptr(ptr)
         else {
-            return (Ptr::null(), None);
+            return (None, None);
         };
         (next, Some((key, value)))
     }
 
+    #[inline]
     fn remove_key<K: std::hash::Hash + Eq>(
         key: &K,
         _: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
-        queue.remove(key).map(|removed| removed.1.value)
+        queue.remove(key)
     }
 
+    #[inline]
     fn iter<'q, K>(
         _: &'q Self::MetadataType,
-        queue: &'q LinkedHashMap<K, MruEntry<T>>,
+        queue: &'q LinkedHashMap<K, MruEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
@@ -159,33 +169,38 @@ impl<T> Policy<T> for MruPolicy {
         queue.iter().map(|(k, v)| (k, v.value()))
     }
 
-    fn into_iter<K>(_: Self::MetadataType, queue: LinkedHashMap<K, MruEntry<T>>) -> IntoIter<K, T> {
+    #[inline]
+    fn into_iter<K>(
+        _: Self::MetadataType,
+        queue: LinkedHashMap<K, MruEntry<T>, RandomState>,
+    ) -> IntoIter<K, T> {
         IntoIter {
             inner: queue.into_iter(),
         }
     }
 
+    #[inline]
     fn into_entries<K>(
         _: Self::MetadataType,
-        queue: LinkedHashMap<K, MruEntry<T>>,
+        queue: LinkedHashMap<K, MruEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (K, MruEntry<T>)> {
         queue.into_iter()
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    #[inline]
     fn debug_validate<K: std::hash::Hash + Eq + std::fmt::Debug>(
         _: &Self::MetadataType,
-        queue: &LinkedHashMap<K, MruEntry<T>>,
+        _: &LinkedHashMap<K, MruEntry<T>, RandomState>,
     ) where
         T: std::fmt::Debug,
     {
-        queue.debug_validate();
     }
 }
 
 #[doc(hidden)]
 pub struct IntoIter<K, T> {
-    inner: linked_hashmap::IntoIter<K, MruEntry<T>>,
+    inner: linked_hash_map::IntoIter<K, MruEntry<T>>,
 }
 
 impl<K, T> Iterator for IntoIter<K, T> {

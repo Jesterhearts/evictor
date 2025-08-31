@@ -1,19 +1,17 @@
 use std::hash::Hash;
 
-use crate::{
-    EntryValue,
-    InsertOrUpdateAction,
-    InsertionResult,
-    Metadata,
-    Policy,
-    linked_hashmap::{
-        self,
-        LinkedHashMap,
-        Ptr,
-        RemovedEntry,
-    },
-    private,
-};
+use tether_map::Ptr;
+use tether_map::linked_hash_map;
+use tether_map::linked_hash_map::LinkedHashMap;
+use tether_map::linked_hash_map::RemovedEntry;
+
+use crate::EntryValue;
+use crate::InsertOrUpdateAction;
+use crate::InsertionResult;
+use crate::Metadata;
+use crate::Policy;
+use crate::RandomState;
+use crate::private;
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
@@ -26,7 +24,7 @@ impl private::Sealed for LfuPolicy {}
 pub struct LfuEntry<T> {
     value: T,
     frequency: u64,
-    bucket_ptr: Ptr,
+    bucket_ptr: Option<Ptr>,
 }
 
 impl<T> private::Sealed for LfuEntry<T> {}
@@ -36,7 +34,7 @@ impl<T> EntryValue<T> for LfuEntry<T> {
         Self {
             value,
             frequency: 0,
-            bucket_ptr: Ptr::null(),
+            bucket_ptr: None,
         }
     }
 
@@ -55,8 +53,8 @@ impl<T> EntryValue<T> for LfuEntry<T> {
 
 #[derive(Debug, Clone, Default)]
 struct FreqBucket {
-    tail: Ptr,
-    head: Ptr,
+    tail: Option<Ptr>,
+    head: Option<Ptr>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +68,7 @@ impl Default for LfuMetadata {
     fn default() -> Self {
         let mut frequency_head_tail = LinkedHashMap::default();
         frequency_head_tail.insert_tail(0, FreqBucket::default());
-        let head_bucket = frequency_head_tail.head_ptr();
+        let head_bucket = frequency_head_tail.head_ptr().unwrap();
         Self {
             frequency_head_tail,
             head_bucket,
@@ -84,24 +82,28 @@ impl<T> Metadata<T> for LfuMetadata {
     type EntryType = LfuEntry<T>;
 
     #[inline]
-    fn candidate_removal_index<K>(&self, queue: &LinkedHashMap<K, LfuEntry<T>>) -> Ptr {
+    fn candidate_removal_index<K>(
+        &self,
+        queue: &LinkedHashMap<K, LfuEntry<T>, RandomState>,
+    ) -> Option<Ptr> {
         queue.head_ptr()
     }
 }
 
 impl<T> Policy<T> for LfuPolicy {
-    type IntoIter<K> = IntoIter<K, T>;
+    type IntoIter<K: Hash + Eq> = IntoIter<K, T>;
     type MetadataType = LfuMetadata;
 
+    #[inline]
     fn insert_or_update_entry<K: Hash + Eq>(
         key: K,
         make_room_on_insert: bool,
         get_value: impl FnOnce(&K, /* is_insert */ bool) -> InsertOrUpdateAction<T>,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> crate::InsertionResult<K, T> {
         match queue.entry(key) {
-            linked_hashmap::Entry::Occupied(mut occupied_entry) => {
+            linked_hash_map::Entry::Occupied(mut occupied_entry) => {
                 let ptr = occupied_entry.ptr();
                 match get_value(occupied_entry.key(), false) {
                     InsertOrUpdateAction::InsertOrUpdate(value) => {
@@ -118,7 +120,7 @@ impl<T> Policy<T> for LfuPolicy {
                     }
                 }
             }
-            linked_hashmap::Entry::Vacant(entry) => {
+            linked_hash_map::Entry::Vacant(entry) => {
                 let value = match get_value(entry.key(), true) {
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                     InsertOrUpdateAction::NoInsert(value) => {
@@ -129,25 +131,27 @@ impl<T> Policy<T> for LfuPolicy {
                     }
                 };
                 let ptr = if make_room_on_insert {
-                    let ptr = entry.push_unlinked(LfuEntry {
-                        value,
-                        frequency: 0,
-                        bucket_ptr: metadata.head_bucket,
-                    });
+                    let ptr = entry
+                        .insert_unlinked(LfuEntry {
+                            value,
+                            frequency: 0,
+                            bucket_ptr: Some(metadata.head_bucket),
+                        })
+                        .0;
                     Self::evict_entry(metadata, queue);
                     let head_bucket = metadata
                         .frequency_head_tail
                         .ptr_get_mut(metadata.head_bucket)
                         .expect("Head bucket should exist");
-                    if head_bucket.head.is_null() {
-                        head_bucket.head = ptr;
+                    if head_bucket.head.is_none() {
+                        head_bucket.head = Some(ptr);
                     }
-                    if head_bucket.tail.is_null() {
-                        head_bucket.tail = ptr;
+                    if head_bucket.tail.is_none() {
+                        head_bucket.tail = Some(ptr);
                         queue.link_as_head(ptr);
                     } else {
-                        queue.link_node(ptr, head_bucket.tail, Ptr::null(), false);
-                        head_bucket.tail = ptr;
+                        queue.link_after(ptr, head_bucket.tail.unwrap());
+                        head_bucket.tail = Some(ptr);
                     }
                     ptr
                 } else {
@@ -155,25 +159,29 @@ impl<T> Policy<T> for LfuPolicy {
                         .frequency_head_tail
                         .ptr_get_mut(metadata.head_bucket)
                         .expect("Head bucket should exist");
-                    let ptr = if head_bucket.tail.is_null() {
-                        entry.insert_head(LfuEntry {
-                            value,
-                            frequency: 0,
-                            bucket_ptr: metadata.head_bucket,
-                        })
-                    } else {
-                        entry.insert_after(
-                            LfuEntry {
+                    let ptr = if head_bucket.tail.is_none() {
+                        entry
+                            .insert_head(LfuEntry {
                                 value,
                                 frequency: 0,
-                                bucket_ptr: metadata.head_bucket,
-                            },
-                            head_bucket.tail,
-                        )
+                                bucket_ptr: Some(metadata.head_bucket),
+                            })
+                            .0
+                    } else {
+                        entry
+                            .insert_after(
+                                LfuEntry {
+                                    value,
+                                    frequency: 0,
+                                    bucket_ptr: Some(metadata.head_bucket),
+                                },
+                                head_bucket.tail.unwrap(),
+                            )
+                            .0
                     };
-                    head_bucket.tail = ptr;
-                    if head_bucket.head.is_null() {
-                        head_bucket.head = ptr;
+                    head_bucket.tail = Some(ptr);
+                    if head_bucket.head.is_none() {
+                        head_bucket.head = Some(ptr);
                     }
                     ptr
                 };
@@ -183,10 +191,11 @@ impl<T> Policy<T> for LfuPolicy {
         }
     }
 
+    #[inline]
     fn touch_entry<K: Hash + Eq>(
         index: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, LfuEntry<T>>,
+        queue: &mut LinkedHashMap<K, LfuEntry<T>, RandomState>,
     ) {
         // I.e. if you've been running this cache for hundreds of years (~600 years
         // worth of nanonseconds in a u64), don't do anything to re-order the
@@ -201,26 +210,26 @@ impl<T> Policy<T> for LfuPolicy {
 
         let mut bucket_cursor = metadata
             .frequency_head_tail
-            .ptr_cursor_mut(queue[index].bucket_ptr);
+            .ptr_cursor_mut(queue[index].bucket_ptr.unwrap());
 
         let old_prev = queue.prev_ptr(index);
         let old_next = queue.next_ptr(index);
 
         if let Some((next_freq, next)) = bucket_cursor.next_mut() {
             if *next_freq == new_frequency {
-                queue.move_after(index, next.tail);
-                next.tail = index;
+                queue.move_after(index, next.tail.unwrap());
+                next.tail = Some(index);
                 debug_assert_ne!(
                     next.head, next.tail,
                     "Head and tail should not be the same after moving an element"
                 );
             } else if *next_freq > new_frequency {
-                queue.move_before(index, next.head);
+                queue.move_before(index, next.head.unwrap());
                 bucket_cursor.insert_after_move_to(
                     new_frequency,
                     FreqBucket {
-                        tail: index,
-                        head: index,
+                        tail: Some(index),
+                        head: Some(index),
                     },
                 );
 
@@ -230,33 +239,27 @@ impl<T> Policy<T> for LfuPolicy {
                 bucket_cursor.insert_after_move_to(
                     new_frequency,
                     FreqBucket {
-                        tail: index,
-                        head: index,
+                        tail: Some(index),
+                        head: Some(index),
                     },
                 );
 
                 bucket_cursor.move_prev();
             }
         } else {
-            let Some((_, bucket)) = bucket_cursor.current() else {
-                unreachable!("Bucket should exist for frequency {old_frequency}");
-            };
-
-            queue.move_after(index, bucket.tail);
+            queue.move_to_tail(index);
 
             bucket_cursor.insert_after_move_to(
                 new_frequency,
                 FreqBucket {
-                    tail: index,
-                    head: index,
+                    tail: Some(index),
+                    head: Some(index),
                 },
             );
             bucket_cursor.move_prev();
         }
 
-        queue[index].bucket_ptr = bucket_cursor
-            .next_ptr()
-            .expect("Just inserted, so next must exist");
+        queue[index].bucket_ptr = bucket_cursor.next_ptr();
 
         let Some((freq, old)) = bucket_cursor.current_mut() else {
             unreachable!("Bucket should exist for frequency {old_frequency}");
@@ -274,56 +277,60 @@ impl<T> Policy<T> for LfuPolicy {
 
         if old.head == old.tail {
             debug_assert_eq!(
-                old.head, index,
+                old.head,
+                Some(index),
                 "Head and tail should be the same when only one element exists in the bucket: {old:?}",
             );
 
             if *freq == 0 {
-                old.head = Ptr::null();
-                old.tail = Ptr::null();
+                old.head = None;
+                old.tail = None;
             } else {
                 bucket_cursor.remove();
             }
         } else {
-            if old.head == index {
-                old.head = old_next.unwrap_or_default();
+            if old.head == Some(index) {
+                old.head = old_next;
             }
-            if old.tail == index {
-                old.tail = old_prev.unwrap_or_default();
+            if old.tail == Some(index) {
+                old.tail = old_prev;
             }
         }
     }
 
+    #[inline]
     fn remove_entry<K: Hash + Eq>(
         ptr: Ptr,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> (
-        Ptr,
+        Option<Ptr>,
         Option<(K, <Self::MetadataType as Metadata<T>>::EntryType)>,
     ) {
         let Some(removed) = queue.remove_ptr(ptr) else {
-            return (Ptr::null(), None);
+            return (None, None);
         };
 
         finish_removal(ptr, metadata, removed)
     }
 
+    #[inline]
     fn remove_key<K: Hash + Eq>(
         key: &K,
         metadata: &mut Self::MetadataType,
-        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType>,
+        queue: &mut LinkedHashMap<K, <Self::MetadataType as Metadata<T>>::EntryType, RandomState>,
     ) -> Option<<Self::MetadataType as Metadata<T>>::EntryType> {
-        let (ptr, removed) = queue.remove(key)?;
+        let (ptr, removed) = queue.remove_full(key)?;
 
         finish_removal(ptr, metadata, removed)
             .1
             .map(|(_, entry)| entry)
     }
 
+    #[inline]
     fn iter<'q, K>(
         _: &'q LfuMetadata,
-        queue: &'q LinkedHashMap<K, LfuEntry<T>>,
+        queue: &'q LinkedHashMap<K, LfuEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (&'q K, &'q T)>
     where
         T: 'q,
@@ -331,27 +338,32 @@ impl<T> Policy<T> for LfuPolicy {
         queue.iter().map(|(k, v)| (k, v.value()))
     }
 
-    fn into_iter<K>(_: Self::MetadataType, queue: LinkedHashMap<K, LfuEntry<T>>) -> IntoIter<K, T> {
+    #[inline]
+    fn into_iter<K>(
+        _: Self::MetadataType,
+        queue: LinkedHashMap<K, LfuEntry<T>, RandomState>,
+    ) -> IntoIter<K, T> {
         IntoIter {
             inner: queue.into_iter(),
         }
     }
 
+    #[inline]
     fn into_entries<K>(
         _: Self::MetadataType,
-        queue: LinkedHashMap<K, LfuEntry<T>>,
+        queue: LinkedHashMap<K, LfuEntry<T>, RandomState>,
     ) -> impl Iterator<Item = (K, LfuEntry<T>)> {
         queue.into_iter()
     }
 
     #[cfg(all(debug_assertions, feature = "internal-debugging"))]
+    #[inline]
     fn debug_validate<K: std::fmt::Debug>(
         metadata: &Self::MetadataType,
-        queue: &LinkedHashMap<K, LfuEntry<T>>,
+        queue: &LinkedHashMap<K, LfuEntry<T>, RandomState>,
     ) where
         T: std::fmt::Debug,
     {
-        queue.debug_validate();
         if metadata.frequency_head_tail.is_empty() {
             assert!(
                 queue.is_empty(),
@@ -370,14 +382,18 @@ impl<T> Policy<T> for LfuPolicy {
                 );
             }
             prev_frequency = Some(*freq);
-            assert!(
-                queue.contains_ptr(bucket.head),
-                "Bucket head index out of bounds: {bucket:?}, {metadata:#?}, {queue:#?}",
-            );
-            assert!(
-                queue.contains_ptr(bucket.tail),
-                "Bucket tail index out of bounds: {bucket:?}, {metadata:#?}, {queue:#?}",
-            );
+            if let Some(head) = bucket.head {
+                assert!(
+                    queue.contains_ptr(head),
+                    "Bucket head index out of bounds: {bucket:?}, {metadata:#?}, {queue:#?}",
+                );
+            }
+            if let Some(tail) = bucket.tail {
+                assert!(
+                    queue.contains_ptr(tail),
+                    "Bucket tail index out of bounds: {bucket:?}, {metadata:#?}, {queue:#?}",
+                );
+            }
         }
     }
 }
@@ -386,10 +402,10 @@ fn finish_removal<K, T>(
     ptr: Ptr,
     metadata: &mut LfuMetadata,
     removed: RemovedEntry<K, LfuEntry<T>>,
-) -> (Ptr, Option<(K, LfuEntry<T>)>) {
+) -> (Option<Ptr>, Option<(K, LfuEntry<T>)>) {
     let mut bucket_cursor = metadata
         .frequency_head_tail
-        .ptr_cursor_mut(removed.value.bucket_ptr);
+        .ptr_cursor_mut(removed.value.bucket_ptr.unwrap());
 
     let Some((_, bucket)) = bucket_cursor.current_mut() else {
         unreachable!(
@@ -400,21 +416,22 @@ fn finish_removal<K, T>(
 
     if bucket.head == bucket.tail {
         debug_assert_eq!(
-            bucket.head, ptr,
+            bucket.head,
+            Some(ptr),
             "Head and tail should be the same when only one element exists in the bucket"
         );
 
-        if removed.value.bucket_ptr == metadata.head_bucket {
-            bucket.head = Ptr::null();
-            bucket.tail = Ptr::null();
+        if removed.value.bucket_ptr == Some(metadata.head_bucket) {
+            bucket.head = None;
+            bucket.tail = None;
         } else {
             bucket_cursor.remove();
         }
     } else {
-        if bucket.head == ptr {
+        if bucket.head == Some(ptr) {
             bucket.head = removed.next;
         }
-        if bucket.tail == ptr {
+        if bucket.tail == Some(ptr) {
             bucket.tail = removed.prev;
         }
     }
@@ -424,7 +441,7 @@ fn finish_removal<K, T>(
 
 #[doc(hidden)]
 pub struct IntoIter<K, T> {
-    inner: linked_hashmap::IntoIter<K, LfuEntry<T>>,
+    inner: linked_hash_map::IntoIter<K, LfuEntry<T>>,
 }
 
 impl<K, T> Iterator for IntoIter<K, T> {
