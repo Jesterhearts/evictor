@@ -170,7 +170,11 @@ impl<K: Hash + Eq, V, P: Policy<V>> DerefMut for Entry<'_, K, V, P> {
 
 impl<'q, K: Hash + Eq, V, P: Policy<V>> Entry<'q, K, V, P> {
     #[inline]
-    pub(crate) fn new(ptr: Ptr, key: &'q K, cache: &'q mut Cache<K, V, P>) -> Self {
+    pub(crate) fn new(
+        ptr: Ptr,
+        key: &'q K,
+        cache: &'q mut Cache<K, V, P>,
+    ) -> Self {
         Self {
             key,
             ptr,

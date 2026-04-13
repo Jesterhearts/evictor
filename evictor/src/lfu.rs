@@ -160,15 +160,7 @@ impl<T> Policy<T> for LfuPolicy {
                         .frequency_head_tail
                         .ptr_get_mut(metadata.head_bucket)
                         .expect("Head bucket should exist");
-                    let ptr = if head_bucket.tail.is_none() {
-                        entry
-                            .insert_head(LfuEntry {
-                                value,
-                                frequency: 0,
-                                bucket_ptr: Some(metadata.head_bucket),
-                            })
-                            .0
-                    } else {
+                    let ptr = if let Some(tail) = head_bucket.tail {
                         entry
                             .insert_after(
                                 LfuEntry {
@@ -176,8 +168,16 @@ impl<T> Policy<T> for LfuPolicy {
                                     frequency: 0,
                                     bucket_ptr: Some(metadata.head_bucket),
                                 },
-                                head_bucket.tail.unwrap(),
+                                tail,
                             )
+                            .0
+                    } else {
+                        entry
+                            .insert_head(LfuEntry {
+                                value,
+                                frequency: 0,
+                                bucket_ptr: Some(metadata.head_bucket),
+                            })
                             .0
                     };
                     head_bucket.tail = Some(ptr);
@@ -280,7 +280,8 @@ impl<T> Policy<T> for LfuPolicy {
             debug_assert_eq!(
                 old.head,
                 Some(index),
-                "Head and tail should be the same when only one element exists in the bucket: {old:?}",
+                "Head and tail should be the same when only one element exists in the bucket: \
+                 {old:?}",
             );
 
             if *freq == 0 {
@@ -379,7 +380,8 @@ impl<T> Policy<T> for LfuPolicy {
             if let Some(prev_freq) = prev_frequency {
                 assert!(
                     *freq > prev_freq,
-                    "Frequency buckets are not in increasing order: {prev_freq} >= {freq}, {metadata:#?}, {queue:#?}",
+                    "Frequency buckets are not in increasing order: {prev_freq} >= {freq}, \
+                     {metadata:#?}, {queue:#?}",
                 );
             }
             prev_frequency = Some(*freq);

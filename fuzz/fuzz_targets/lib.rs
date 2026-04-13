@@ -13,7 +13,10 @@ pub enum CacheOperation {
 }
 
 impl std::fmt::Debug for CacheOperation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             CacheOperation::Insert(k, v) => write!(f, "cache.insert({k}, {v})"),
             CacheOperation::Get(k) => write!(f, "cache.get(&{k})"),

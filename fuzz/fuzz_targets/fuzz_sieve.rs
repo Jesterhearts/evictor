@@ -165,7 +165,8 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
                 );
                 assert!(
                     entries_before.len() >= entries_after.len(),
-                    "Retain operation increased cache size: {entries_before:#?} -> {entries_after:#?}",
+                    "Retain operation increased cache size: {entries_before:#?} -> \
+                     {entries_after:#?}",
                 );
                 let entries_before_filtered = entries_before
                     .into_iter()
@@ -173,7 +174,8 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
                     .collect::<Vec<_>>();
                 assert_eq!(
                     entries_after, entries_before_filtered,
-                    "Retain operation did not retain expected entries: {entries_after:#?} != {entries_before_filtered:#?} {cache:#?}",
+                    "Retain operation did not retain expected entries: {entries_after:#?} != \
+                     {entries_before_filtered:#?} {cache:#?}",
                 );
             }
             CacheOperation::Iter => {

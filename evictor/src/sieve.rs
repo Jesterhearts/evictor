@@ -4,7 +4,9 @@ use std::hash::Hash;
 use tether_map::Ptr;
 use tether_map::linked_hash_map::LinkedHashMap;
 use tether_map::linked_hash_map::RemovedEntry;
-use tether_map::linked_hash_map::{self};
+use tether_map::linked_hash_map::{
+    self,
+};
 
 use crate::EntryValue;
 use crate::InsertOrUpdateAction;

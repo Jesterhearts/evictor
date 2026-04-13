@@ -46,7 +46,10 @@ pub enum InsertionResult<K, T> {
 }
 
 impl<K, T> std::fmt::Debug for InsertionResult<K, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             InsertionResult::Inserted(ptr, _) => f.debug_tuple("Inserted").field(ptr).finish(),
             InsertionResult::Updated(ptr) => f.debug_tuple("Updated").field(ptr).finish(),
@@ -1201,7 +1204,10 @@ where
     PolicyType::MetadataType: std::fmt::Debug,
     <PolicyType::MetadataType as Metadata<Value>>::EntryType: std::fmt::Debug,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.debug_struct("Cache")
             .field("queue", &self.queue)
             .field("capacity", &self.capacity)
@@ -1346,7 +1352,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// assert_eq!(cache.into_iter().collect::<Vec<_>>(), previous_order);
     /// ```
-    pub fn peek(&self, key: &Key) -> Option<&Value> {
+    pub fn peek(
+        &self,
+        key: &Key,
+    ) -> Option<&Value> {
         self.queue.get(key).map(|entry| entry.value())
     }
 
@@ -1438,7 +1447,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// - **No modification**: No additional overhead beyond the lookup
     /// - **With modification**: O(1) cache reordering when the `Entry` is
     ///   dropped
-    pub fn peek_mut<'q>(&'q mut self, key: &'q Key) -> Option<Entry<'q, Key, Value, PolicyType>> {
+    pub fn peek_mut<'q>(
+        &'q mut self,
+        key: &'q Key,
+    ) -> Option<Entry<'q, Key, Value, PolicyType>> {
         self.queue
             .get_ptr(key)
             .map(|ptr| Entry::new(ptr, key, self))
@@ -1512,7 +1524,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert!(cache.contains_key(&1));
     /// assert!(!cache.contains_key(&2));
     /// ```
-    pub fn contains_key(&self, key: &Key) -> bool {
+    pub fn contains_key(
+        &self,
+        key: &Key,
+    ) -> bool {
         self.queue.contains_key(key)
     }
 
@@ -1691,7 +1706,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(vec_ref.len(), 1);
     /// assert_eq!(vec_ref[0], "hello");
     /// ```
-    pub fn get_or_default(&mut self, key: Key) -> (&Value, Option<Value>)
+    pub fn get_or_default(
+        &mut self,
+        key: Key,
+    ) -> (&Value, Option<Value>)
     where
         Value: Default,
     {
@@ -1738,7 +1756,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// vec_ref.clear();
     /// assert!(cache.get(&1).unwrap().is_empty());
     /// ```
-    pub fn get_or_default_mut(&mut self, key: Key) -> (&mut Value, Option<Value>)
+    pub fn get_or_default_mut(
+        &mut self,
+        key: Key,
+    ) -> (&mut Value, Option<Value>)
     where
         Value: Default,
     {
@@ -1786,7 +1807,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///     Some("new_one".to_string())
     /// );
     /// ```
-    pub fn insert(&mut self, key: Key, value: Value) -> Option<Value> {
+    pub fn insert(
+        &mut self,
+        key: Key,
+        value: Value,
+    ) -> Option<Value> {
         let will_evict = self.queue.len() == self.capacity.get();
         let result = PolicyType::insert_or_update_entry(
             key,
@@ -1868,7 +1893,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///     [(2, "two".to_string()), (3, "three_latest".to_string())]
     /// );
     /// ```
-    pub fn insert_mut(&mut self, key: Key, value: Value) -> (&mut Value, Option<Value>) {
+    pub fn insert_mut(
+        &mut self,
+        key: Key,
+        value: Value,
+    ) -> (&mut Value, Option<Value>) {
         let will_evict = self.queue.len() == self.capacity.get();
         let result = PolicyType::insert_or_update_entry(
             key,
@@ -1902,7 +1931,11 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
 
     /// The immutable version of `try_insert_or_update_mut`. See
     /// [`Self::try_insert_or_update_mut`] for details.
-    pub fn try_insert_or_update(&mut self, key: Key, value: Value) -> Result<&Value, (Key, Value)> {
+    pub fn try_insert_or_update(
+        &mut self,
+        key: Key,
+        value: Value,
+    ) -> Result<&Value, (Key, Value)> {
         self.try_insert_or_update_mut(key, value).map(|v| &*v)
     }
 
@@ -2162,7 +2195,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     }
 
     /// The immutable version of `get_mut`. See [`Self::get_mut`] for details.
-    pub fn get(&mut self, key: &Key) -> Option<&Value> {
+    pub fn get(
+        &mut self,
+        key: &Key,
+    ) -> Option<&Value> {
         self.get_mut(key).map(|v| &*v)
     }
 
@@ -2207,7 +2243,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///     vec![(2, "two".to_string()), (1, "one_modified".to_string())]
     /// );
     /// ```
-    pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
+    pub fn get_mut(
+        &mut self,
+        key: &Key,
+    ) -> Option<&mut Value> {
         if let Some(index) = self.queue.get_ptr(key) {
             PolicyType::touch_entry(index, &mut self.metadata, &mut self.queue);
 
@@ -2306,7 +2345,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///     vec![(2, "two".to_string())]
     /// );
     /// ```
-    pub fn remove(&mut self, key: &Key) -> Option<Value> {
+    pub fn remove(
+        &mut self,
+        key: &Key,
+    ) -> Option<Value> {
         PolicyType::remove_key(key, &mut self.metadata, &mut self.queue)
             .map(|entry| entry.into_value())
     }
@@ -2406,7 +2448,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(cache.capacity(), 2);
     /// assert_eq!(cache.len(), 2); // One entry was evicted
     /// ```
-    pub fn set_capacity(&mut self, capacity: NonZeroUsize) -> Vec<(Key, Value)> {
+    pub fn set_capacity(
+        &mut self,
+        capacity: NonZeroUsize,
+    ) -> Vec<(Key, Value)> {
         assert!((capacity.get() as u32) < u32::MAX - 1, "Capacity too large");
         let mut evicted = Vec::with_capacity(self.queue.len().saturating_sub(capacity.get()));
         if capacity.get() < self.queue.len() {
@@ -2496,7 +2541,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(evicted.len(), 2);
     /// assert_eq!(cache.len(), 0);
     /// ```
-    pub fn evict_to_size(&mut self, n: usize) -> Vec<(Key, Value)> {
+    pub fn evict_to_size(
+        &mut self,
+        n: usize,
+    ) -> Vec<(Key, Value)> {
         let mut evicted = Vec::with_capacity(n);
         while self.queue.len() > n
             && let Some(kv) = self.pop()
@@ -2579,7 +2627,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(evicted.len(), 0); // No eviction requested
     /// assert_eq!(cache.len(), 1); // Cache unchanged
     /// ```
-    pub fn evict_n_entries(&mut self, n: usize) -> Vec<(Key, Value)> {
+    pub fn evict_n_entries(
+        &mut self,
+        n: usize,
+    ) -> Vec<(Key, Value)> {
         let mut evicted = Vec::with_capacity(n);
         for _ in 0..n {
             if let Some(kv) = self.pop() {
@@ -2867,8 +2918,10 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///     [(2, "banana".to_string()), (4, "date".to_string())]
     /// );
     /// ```
-    pub fn retain<F>(&mut self, mut f: F)
-    where
+    pub fn retain<F>(
+        &mut self,
+        mut f: F,
+    ) where
         F: FnMut(&Key, &mut Value) -> bool,
     {
         let mut next = self.queue.head_cursor_mut();
@@ -3049,8 +3102,10 @@ impl<K: Hash + Eq, V, PolicyType: Policy<V>> Extend<(K, V)> for Cache<K, V, Poli
     /// cache.extend(vec![(1, "one".to_string()), (2, "two".to_string())]);
     /// assert_eq!(cache.len(), 2);
     /// ```
-    fn extend<I>(&mut self, iter: I)
-    where
+    fn extend<I>(
+        &mut self,
+        iter: I,
+    ) where
         I: IntoIterator<Item = (K, V)>,
     {
         for (key, value) in iter {
