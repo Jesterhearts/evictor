@@ -5,9 +5,7 @@ macro_rules! impl_queue_policy {
         use tether_map::Ptr;
         use tether_map::linked_hash_map::LinkedHashMap;
         use tether_map::linked_hash_map::RemovedEntry;
-        use tether_map::linked_hash_map::{
-            self,
-        };
+        use tether_map::linked_hash_map::{self};
 
         use crate::EntryValue;
         use crate::InsertOrUpdateAction;
@@ -113,15 +111,16 @@ macro_rules! impl_queue_policy {
                             }
                             InsertOrUpdateAction::InsertOrUpdate(value) => value,
                         };
-                        let ptr = if make_room_on_insert {
+                        let (ptr, evicted) = if make_room_on_insert {
                             let ptr = vacant_entry.insert_unlinked($entry_name::new(value)).0;
-                            Self::evict_entry(metadata, queue);
+                            let evicted = Self::evict_entry(metadata, queue)
+                                .map(|(_, entry)| entry.into_value());
                             $link!(queue, ptr);
-                            ptr
+                            (ptr, evicted)
                         } else {
-                            $insert!(vacant_entry, $entry_name::new(value)).0
+                            ($insert!(vacant_entry, $entry_name::new(value)).0, None)
                         };
-                        InsertionResult::Inserted(ptr)
+                        InsertionResult::Inserted(ptr, evicted)
                     }
                 }
             }
@@ -374,8 +373,9 @@ mod tests {
 
         fifo.get(&1);
 
-        let value = fifo.get_or_insert_with(3, |_| 30);
+        let (value, evicted) = fifo.get_or_insert_with(3, |_| 30);
         assert_eq!(value, &30);
+        assert_eq!(evicted, Some(10));
 
         assert_eq!(fifo.into_iter().collect::<Vec<_>>(), [(2, 20), (3, 30)]);
     }
@@ -389,8 +389,9 @@ mod tests {
         fifo.insert(2, 20);
         fifo.insert(3, 30);
 
-        let value = fifo.get_or_insert_with(1, |_| 999);
+        let (value, evicted) = fifo.get_or_insert_with(1, |_| 999);
         assert_eq!(value, &10);
+        assert!(evicted.is_none());
 
         fifo.insert(4, 40);
 
@@ -557,12 +558,12 @@ mod tests {
     fn test_fifo_insert_mut() {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
 
-        let val = fifo.insert_mut(1, String::from("test"));
+        let (val, _) = fifo.insert_mut(1, String::from("test"));
         val.push_str(" modified");
 
         assert_eq!(fifo.get(&1), Some(&String::from("test modified")));
 
-        let val = fifo.insert_mut(1, String::from("replaced"));
+        let (val, _) = fifo.insert_mut(1, String::from("replaced"));
         val.push_str(" again");
 
         assert_eq!(fifo.get(&1), Some(&String::from("replaced again")));
@@ -574,12 +575,12 @@ mod tests {
         let mut fifo = Fifo::new(NonZeroUsize::new(2).unwrap());
         fifo.insert(1, String::from("existing"));
 
-        let val = fifo.get_or_insert_with_mut(1, |_| String::from("new"));
+        let (val, _) = fifo.get_or_insert_with_mut(1, |_| String::from("new"));
         val.push_str(" modified");
 
         assert_eq!(fifo.get(&1), Some(&String::from("existing modified")));
 
-        let val = fifo.get_or_insert_with_mut(2, |_| String::from("created"));
+        let (val, _) = fifo.get_or_insert_with_mut(2, |_| String::from("created"));
         val.push_str(" also modified");
 
         assert_eq!(fifo.get(&2), Some(&String::from("created also modified")));
@@ -770,8 +771,9 @@ mod tests {
 
         lifo.get(&1);
 
-        let value = lifo.get_or_insert_with(3, |_| 30);
+        let (value, evicted) = lifo.get_or_insert_with(3, |_| 30);
         assert_eq!(value, &30);
+        assert_eq!(evicted, Some(20));
 
         assert_eq!(lifo.into_iter().collect::<Vec<_>>(), [(3, 30), (1, 10),]);
     }
@@ -785,8 +787,9 @@ mod tests {
         lifo.insert(2, 20);
         lifo.insert(3, 30);
 
-        let value = lifo.get_or_insert_with(1, |_| 999);
+        let (value, evicted) = lifo.get_or_insert_with(1, |_| 999);
         assert_eq!(value, &10);
+        assert!(evicted.is_none());
 
         lifo.insert(4, 40);
 
@@ -956,12 +959,12 @@ mod tests {
     fn test_lifo_insert_mut() {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
 
-        let val = lifo.insert_mut(1, String::from("test"));
+        let (val, _) = lifo.insert_mut(1, String::from("test"));
         val.push_str(" modified");
 
         assert_eq!(lifo.get(&1), Some(&String::from("test modified")));
 
-        let val = lifo.insert_mut(1, String::from("replaced"));
+        let (val, _) = lifo.insert_mut(1, String::from("replaced"));
         val.push_str(" again");
 
         assert_eq!(lifo.get(&1), Some(&String::from("replaced again")));
@@ -973,12 +976,12 @@ mod tests {
         let mut lifo = Lifo::new(NonZeroUsize::new(2).unwrap());
         lifo.insert(1, String::from("existing"));
 
-        let val = lifo.get_or_insert_with_mut(1, |_| String::from("new"));
+        let (val, _) = lifo.get_or_insert_with_mut(1, |_| String::from("new"));
         val.push_str(" modified");
 
         assert_eq!(lifo.get(&1), Some(&String::from("existing modified")));
 
-        let val = lifo.get_or_insert_with_mut(2, |_| String::from("created"));
+        let (val, _) = lifo.get_or_insert_with_mut(2, |_| String::from("created"));
         val.push_str(" also modified");
 
         assert_eq!(lifo.get(&2), Some(&String::from("created also modified")));

@@ -3,9 +3,7 @@ use std::hash::Hash;
 use tether_map::Ptr;
 use tether_map::linked_hash_map::LinkedHashMap;
 use tether_map::linked_hash_map::RemovedEntry;
-use tether_map::linked_hash_map::{
-    self,
-};
+use tether_map::linked_hash_map::{self};
 
 use crate::EntryValue;
 use crate::InsertOrUpdateAction;
@@ -104,10 +102,12 @@ impl<T> Policy<T> for LruPolicy {
                     }
                     InsertOrUpdateAction::InsertOrUpdate(value) => {
                         vacant_entry.insert_tail(LruEntry::new(value));
-                        if make_room_on_insert {
-                            Self::evict_entry(metadata, queue);
-                        }
-                        InsertionResult::Inserted(queue.tail_ptr().unwrap())
+                        let evicted = if make_room_on_insert {
+                            Self::evict_entry(metadata, queue).map(|(_, entry)| entry.into_value())
+                        } else {
+                            None
+                        };
+                        InsertionResult::Inserted(queue.tail_ptr().unwrap(), evicted)
                     }
                 }
             }
@@ -238,8 +238,8 @@ mod tests {
         lru.insert("b", 2);
         lru.insert("c", 3);
 
-        assert_eq!(lru.get_or_insert_with("a", |_| 10), &1);
-        assert_eq!(lru.get_or_insert_with("d", |_| 4), &4);
+        assert_eq!(lru.get_or_insert_with("a", |_| 10), (&1, None));
+        assert_eq!(lru.get_or_insert_with("d", |_| 4), (&4, Some(2)));
         assert_eq!(lru.get(&"a"), Some(&1));
         assert_eq!(lru.get(&"b"), None);
     }
@@ -382,8 +382,9 @@ mod tests {
 
         lru.get(&1);
 
-        let value = lru.get_or_insert_with(3, |_| 30);
+        let (value, evicted) = lru.get_or_insert_with(3, |_| 30);
         assert_eq!(value, &30);
+        assert_eq!(evicted, Some(20));
 
         assert_eq!(lru.into_iter().collect::<Vec<_>>(), [(1, 10), (3, 30)]);
     }
@@ -397,8 +398,9 @@ mod tests {
         lru.insert(2, 20);
         lru.insert(3, 30);
 
-        let value = lru.get_or_insert_with(1, |_| 999);
+        let (value, evicted) = lru.get_or_insert_with(1, |_| 999);
         assert_eq!(value, &10);
+        assert!(evicted.is_none());
 
         lru.insert(4, 40);
 
@@ -632,13 +634,15 @@ mod tests {
     fn test_lru_insert_mut() {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
 
-        let val = lru.insert_mut(1, String::from("test"));
+        let (val, evicted) = lru.insert_mut(1, String::from("test"));
         val.push_str(" modified");
+        assert!(evicted.is_none());
 
         assert_eq!(lru.get(&1), Some(&String::from("test modified")));
 
-        let val = lru.insert_mut(1, String::from("replaced"));
+        let (val, evicted) = lru.insert_mut(1, String::from("replaced"));
         val.push_str(" again");
+        assert!(evicted.is_none());
 
         assert_eq!(lru.get(&1), Some(&String::from("replaced again")));
     }
@@ -649,12 +653,12 @@ mod tests {
         let mut lru = Lru::new(NonZeroUsize::new(2).unwrap());
         lru.insert(1, String::from("existing"));
 
-        let val = lru.get_or_insert_with_mut(1, |_| String::from("new"));
+        let (val, _) = lru.get_or_insert_with_mut(1, |_| String::from("new"));
         val.push_str(" modified");
 
         assert_eq!(lru.get(&1), Some(&String::from("existing modified")));
 
-        let val = lru.get_or_insert_with_mut(2, |_| String::from("created"));
+        let (val, _) = lru.get_or_insert_with_mut(2, |_| String::from("created"));
         val.push_str(" also modified");
 
         assert_eq!(lru.get(&2), Some(&String::from("created also modified")));

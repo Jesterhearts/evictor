@@ -130,7 +130,7 @@ impl<T> Policy<T> for LfuPolicy {
                         unreachable!("Cache miss should not return TouchNoUpdate");
                     }
                 };
-                let ptr = if make_room_on_insert {
+                let (ptr, evicted) = if make_room_on_insert {
                     let ptr = entry
                         .insert_unlinked(LfuEntry {
                             value,
@@ -138,7 +138,8 @@ impl<T> Policy<T> for LfuPolicy {
                             bucket_ptr: Some(metadata.head_bucket),
                         })
                         .0;
-                    Self::evict_entry(metadata, queue);
+                    let evicted =
+                        Self::evict_entry(metadata, queue).map(|(_, entry)| entry.into_value());
                     let head_bucket = metadata
                         .frequency_head_tail
                         .ptr_get_mut(metadata.head_bucket)
@@ -153,7 +154,7 @@ impl<T> Policy<T> for LfuPolicy {
                         queue.link_after(ptr, head_bucket.tail.unwrap());
                         head_bucket.tail = Some(ptr);
                     }
-                    ptr
+                    (ptr, evicted)
                 } else {
                     let head_bucket = metadata
                         .frequency_head_tail
@@ -183,10 +184,10 @@ impl<T> Policy<T> for LfuPolicy {
                     if head_bucket.head.is_none() {
                         head_bucket.head = Some(ptr);
                     }
-                    ptr
+                    (ptr, None)
                 };
 
-                InsertionResult::Inserted(ptr)
+                InsertionResult::Inserted(ptr, evicted)
             }
         }
     }
@@ -543,12 +544,14 @@ mod tests {
     fn test_lfu_cache_get_or_insert_with() {
         let mut cache = Lfu::new(NonZeroUsize::new(2).unwrap());
 
-        let value = cache.get_or_insert_with(1, |_| "one".to_string());
+        let (value, evicted) = cache.get_or_insert_with(1, |_| "one".to_string());
         assert_eq!(value, "one");
+        assert!(evicted.is_none());
         assert_eq!(cache.len(), 1);
 
-        let value = cache.get_or_insert_with(1, |_| "different".to_string());
+        let (value, evicted) = cache.get_or_insert_with(1, |_| "different".to_string());
         assert_eq!(value, "one");
+        assert!(evicted.is_none());
         assert_eq!(cache.len(), 1);
     }
 
@@ -684,7 +687,7 @@ mod tests {
     fn test_lfu_cache_mutable_operations() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
-        let value_ref = cache.insert_mut(1, "one".to_string());
+        let (value_ref, _) = cache.insert_mut(1, "one".to_string());
         value_ref.push_str(" modified");
         assert_eq!(cache.peek(&1), Some(&"one modified".to_string()));
 
@@ -693,7 +696,7 @@ mod tests {
         }
         assert_eq!(cache.peek(&1), Some(&"one modified again".to_string()));
 
-        let value_ref = cache.get_or_insert_with_mut(2, |_| "two".to_string());
+        let (value_ref, _) = cache.get_or_insert_with_mut(2, |_| "two".to_string());
         value_ref.push_str(" new");
         assert_eq!(cache.peek(&2), Some(&"two new".to_string()));
     }
@@ -831,10 +834,10 @@ mod tests {
         cache.insert(1, "one");
         cache.insert(2, "two");
 
-        let value = cache.get_or_insert_with(1, |_| "new_one");
+        let (value, _) = cache.get_or_insert_with(1, |_| "new_one");
         assert_eq!(*value, "one");
 
-        let value = cache.get_or_insert_with(3, |_| "three");
+        let (value, _) = cache.get_or_insert_with(3, |_| "three");
         assert_eq!(*value, "three");
 
         cache.insert(4, "four");
@@ -878,7 +881,7 @@ mod tests {
     fn test_lfu_cache_insert_mut_frequency_behavior() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
-        let val1 = cache.insert_mut(1, "one".to_string());
+        let (val1, _) = cache.insert_mut(1, "one".to_string());
         val1.push_str("_modified");
 
         cache.insert(2, "two".to_string());
@@ -1043,10 +1046,10 @@ mod tests {
         cache.insert(1, 10);
         cache.insert(2, 20);
 
-        let val = cache.get_or_insert_with(1, |_| 999);
+        let (val, _) = cache.get_or_insert_with(1, |_| 999);
         assert_eq!(*val, 10);
 
-        let val = cache.get_or_insert_with(3, |_| 30);
+        let (val, _) = cache.get_or_insert_with(3, |_| 30);
         assert_eq!(*val, 30);
         assert_eq!(cache.len(), 3);
 
@@ -1063,7 +1066,7 @@ mod tests {
     fn test_lfu_mutable_references() {
         let mut cache = Lfu::new(NonZeroUsize::new(3).unwrap());
 
-        let val = cache.insert_mut(1, "test".to_string());
+        let (val, _) = cache.insert_mut(1, "test".to_string());
         val.push_str("_modified");
 
         cache.insert(2, "second".to_string());

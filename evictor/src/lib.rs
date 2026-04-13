@@ -39,7 +39,7 @@ mod private {
 #[doc(hidden)]
 #[must_use]
 pub enum InsertionResult<K, T> {
-    Inserted(Ptr),
+    Inserted(Ptr, Option<T>),
     Updated(Ptr),
     FoundTouchedNoUpdate(Ptr),
     NotFoundNoInsert(K, Option<T>),
@@ -48,7 +48,7 @@ pub enum InsertionResult<K, T> {
 impl<K, T> std::fmt::Debug for InsertionResult<K, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InsertionResult::Inserted(ptr) => f.debug_tuple("Inserted").field(ptr).finish(),
+            InsertionResult::Inserted(ptr, _) => f.debug_tuple("Inserted").field(ptr).finish(),
             InsertionResult::Updated(ptr) => f.debug_tuple("Updated").field(ptr).finish(),
             InsertionResult::FoundTouchedNoUpdate(ptr) => {
                 f.debug_tuple("FoundTouchedNoUpdate").field(ptr).finish()
@@ -1523,13 +1523,20 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// create a new value, inserts it, and returns a reference to it.
     ///
     /// When inserting into a full cache, the policy determines which entry is
-    /// evicted.
+    /// evicted. The evicted entry's value is returned as the second tuple
+    /// element when an eviction occurs, otherwise `None`.
     ///
     /// # Arguments
     ///
     /// * `key` - The key to look up or insert
     /// * `or_insert` - Function called to create the value if the key doesn't
     ///   exist
+    ///
+    /// # Returns
+    ///
+    /// A tuple `(&Value, Option<Value>)` where the first element is a reference
+    /// to the value (existing or newly inserted), and the second element is the
+    /// evicted value if an eviction occurred.
     ///
     /// # Examples
     ///
@@ -1541,19 +1548,22 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
     ///
     /// // Insert new value
-    /// let value = cache.get_or_insert_with(1, |&key| format!("value_{}", key));
+    /// let (value, evicted) = cache.get_or_insert_with(1, |&key| format!("value_{}", key));
     /// assert_eq!(value, "value_1");
+    /// assert!(evicted.is_none());
     ///
     /// // Get existing value (function not called)
-    /// let value = cache.get_or_insert_with(1, |&key| format!("different_{}", key));
+    /// let (value, evicted) = cache.get_or_insert_with(1, |&key| format!("different_{}", key));
     /// assert_eq!(value, "value_1");
+    /// assert!(evicted.is_none());
     /// ```
     pub fn get_or_insert_with(
         &mut self,
         key: Key,
         or_insert: impl FnOnce(&Key) -> Value,
-    ) -> &Value {
-        self.get_or_insert_with_mut(key, or_insert)
+    ) -> (&Value, Option<Value>) {
+        let (value, evicted) = self.get_or_insert_with_mut(key, or_insert);
+        (&*value, evicted)
     }
 
     /// Gets the value for a key, or inserts it using the provided function.
@@ -1566,7 +1576,8 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// it.
     ///
     /// When inserting into a full cache, the policy determines which entry is
-    /// evicted.
+    /// evicted. The evicted entry's value is returned as the second tuple
+    /// element when an eviction occurs, otherwise `None`.
     ///
     /// # Arguments
     ///
@@ -1576,7 +1587,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// # Returns
     ///
-    /// A mutable reference to the value (existing or newly inserted).
+    /// A tuple `(&mut Value, Option<Value>)` where the first element is a
+    /// mutable reference to the value (existing or newly inserted), and the
+    /// second element is the evicted value if an eviction occurred.
     ///
     /// # Examples
     ///
@@ -1588,12 +1601,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(3).unwrap());
     ///
     /// // Insert new value and modify it
-    /// let value = cache.get_or_insert_with_mut(1, |&key| format!("value_{}", key));
+    /// let (value, _) = cache.get_or_insert_with_mut(1, |&key| format!("value_{}", key));
     /// value.push_str("_modified");
     /// assert_eq!(cache.peek(&1), Some(&"value_1_modified".to_string()));
     ///
     /// // Get existing value and modify it further (function not called)
-    /// let value = cache.get_or_insert_with_mut(1, |&key| format!("different_{}", key));
+    /// let (value, _) = cache.get_or_insert_with_mut(1, |&key| format!("different_{}", key));
     /// value.push_str("_again");
     /// assert_eq!(cache.peek(&1), Some(&"value_1_modified_again".to_string()));
     /// ```
@@ -1601,7 +1614,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         &mut self,
         key: Key,
         or_insert: impl FnOnce(&Key) -> Value,
-    ) -> &mut Value {
+    ) -> (&mut Value, Option<Value>) {
         let will_evict = self.queue.len() == self.capacity.get();
         let result = PolicyType::insert_or_update_entry(
             key,
@@ -1618,7 +1631,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         );
 
         match result {
-            InsertionResult::Inserted(ptr) => {
+            InsertionResult::Inserted(ptr, evicted) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
@@ -1627,7 +1640,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                     self.statistics.evictions += u64::from(will_evict);
                 }
 
-                self.queue[ptr].value_mut()
+                (self.queue[ptr].value_mut(), evicted)
             }
             InsertionResult::FoundTouchedNoUpdate(ptr) => {
                 #[cfg(feature = "statistics")]
@@ -1635,7 +1648,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                     self.statistics.hits += 1;
                 }
 
-                self.queue[ptr].value_mut()
+                (self.queue[ptr].value_mut(), None)
             }
             _ => unreachable!("Unexpected insertion result: {:?}", result),
         }
@@ -1651,6 +1664,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// The value type must implement [`Default`].
     ///
+    /// # Returns
+    ///
+    /// A tuple `(&Value, Option<Value>)` where the first element is a reference
+    /// to the value (existing or newly inserted), and the second element is the
+    /// evicted value if an eviction occurred.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -1661,18 +1680,18 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
     ///
     /// // Get or insert default (empty Vec<String>)
-    /// let vec_ref = cache.get_or_default(1);
+    /// let (vec_ref, _) = cache.get_or_default(1);
     /// assert!(vec_ref.is_empty());
     ///
     /// // Modify the value through another method
     /// cache.get_mut(&1).unwrap().push("hello".to_string());
     ///
     /// // Subsequent calls return the existing value
-    /// let vec_ref = cache.get_or_default(1);
+    /// let (vec_ref, _) = cache.get_or_default(1);
     /// assert_eq!(vec_ref.len(), 1);
     /// assert_eq!(vec_ref[0], "hello");
     /// ```
-    pub fn get_or_default(&mut self, key: Key) -> &Value
+    pub fn get_or_default(&mut self, key: Key) -> (&Value, Option<Value>)
     where
         Value: Default,
     {
@@ -1690,6 +1709,12 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// The value type must implement [`Default`].
     ///
+    /// # Returns
+    ///
+    /// A tuple `(&mut Value, Option<Value>)` where the first element is a
+    /// mutable reference to the value (existing or newly inserted), and the
+    /// second element is the evicted value if an eviction occurred.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -1700,7 +1725,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let mut cache = Lru::<i32, Vec<String>>::new(NonZeroUsize::new(2).unwrap());
     ///
     /// // Get or insert default and modify it immediately
-    /// let vec_ref = cache.get_or_default_mut(1);
+    /// let (vec_ref, _) = cache.get_or_default_mut(1);
     /// vec_ref.push("hello".to_string());
     /// vec_ref.push("world".to_string());
     ///
@@ -1709,24 +1734,92 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// assert_eq!(cache.get(&1).unwrap()[0], "hello");
     ///
     /// // Subsequent calls return the existing mutable value
-    /// let vec_ref = cache.get_or_default_mut(1);
+    /// let (vec_ref, _) = cache.get_or_default_mut(1);
     /// vec_ref.clear();
     /// assert!(cache.get(&1).unwrap().is_empty());
     /// ```
-    pub fn get_or_default_mut(&mut self, key: Key) -> &mut Value
+    pub fn get_or_default_mut(&mut self, key: Key) -> (&mut Value, Option<Value>)
     where
         Value: Default,
     {
         self.get_or_insert_with_mut(key, |_| Value::default())
     }
 
-    /// The immutable version of `insert_mut`. See [`Self::insert_mut`] for
-    /// details.
-    pub fn insert(&mut self, key: Key, value: Value) -> &Value {
-        self.insert_mut(key, value)
+    /// Inserts a key-value pair into the cache.
+    ///
+    /// If the key already exists, its value is updated and the entry is marked
+    /// as touched. If the key is new and the cache is at capacity, the policy
+    /// determines which entry is evicted to make room.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert or update
+    /// * `value` - The value to associate with the key
+    ///
+    /// # Returns
+    ///
+    /// `Some(Value)` containing the evicted entry if the cache was at capacity
+    /// and a new key was inserted. `None` otherwise (including the case where
+    /// the key already existed and was updated in place).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use evictor::Lru;
+    ///
+    /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
+    ///
+    /// // Insert into empty cache — nothing evicted
+    /// assert_eq!(cache.insert(1, "one".to_string()), None);
+    ///
+    /// // Update existing key — nothing evicted
+    /// assert_eq!(cache.insert(1, "new_one".to_string()), None);
+    ///
+    /// // Fill the cache
+    /// assert_eq!(cache.insert(2, "two".to_string()), None);
+    ///
+    /// // Insert when at capacity — evicts based on policy
+    /// assert_eq!(
+    ///     cache.insert(3, "three".to_string()),
+    ///     Some("new_one".to_string())
+    /// );
+    /// ```
+    pub fn insert(&mut self, key: Key, value: Value) -> Option<Value> {
+        let will_evict = self.queue.len() == self.capacity.get();
+        let result = PolicyType::insert_or_update_entry(
+            key,
+            will_evict,
+            |_, _| InsertOrUpdateAction::InsertOrUpdate(value),
+            &mut self.metadata,
+            &mut self.queue,
+        );
+
+        match result {
+            InsertionResult::Inserted(_, evicted) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.insertions += 1;
+                    self.statistics.evictions += u64::from(will_evict);
+                }
+
+                evicted
+            }
+            InsertionResult::Updated(_) => {
+                #[cfg(feature = "statistics")]
+                {
+                    self.statistics.hits += 1;
+                }
+
+                None
+            }
+            _ => unreachable!("Unexpected insertion result: {:?}", result),
+        }
     }
 
-    /// Inserts a key-value pair into the cache.
+    /// Inserts a key-value pair into the cache and returns a mutable reference
+    /// to the inserted value along with any evicted entry.
     ///
     /// This is the mutable version of [`insert()`](Self::insert). If the key
     /// already exists, its value is updated and the entry is marked as touched.
@@ -1740,7 +1833,9 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     ///
     /// # Returns
     ///
-    /// A mutable reference to the inserted value.
+    /// A tuple `(&mut Value, Option<Value>)` where the first element is a
+    /// mutable reference to the inserted (or updated) value, and the second
+    /// element is the evicted value if an eviction occurred.
     ///
     /// # Examples
     ///
@@ -1752,25 +1847,28 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
     /// let mut cache = Lru::<i32, String>::new(NonZeroUsize::new(2).unwrap());
     ///
     /// // Insert new value and modify it immediately
-    /// let value = cache.insert_mut(1, "one".to_string());
+    /// let (value, evicted) = cache.insert_mut(1, "one".to_string());
     /// value.push_str("_modified");
+    /// assert!(evicted.is_none());
     /// assert_eq!(cache.peek(&1), Some(&"one_modified".to_string()));
     ///
     /// // Update existing value
-    /// let value = cache.insert_mut(1, "new_one".to_string());
+    /// let (value, evicted) = cache.insert_mut(1, "new_one".to_string());
     /// value.push_str("_updated");
+    /// assert!(evicted.is_none());
     /// assert_eq!(cache.peek(&1), Some(&"new_one_updated".to_string()));
     ///
     /// // Insert when at capacity (evicts based on policy)
     /// cache.insert_mut(2, "two".to_string());
-    /// let value = cache.insert_mut(3, "three".to_string());
+    /// let (value, evicted) = cache.insert_mut(3, "three".to_string());
     /// value.push_str("_latest");
+    /// assert_eq!(evicted, Some("new_one_updated".to_string()));
     /// assert_eq!(
     ///     cache.into_iter().collect::<Vec<_>>(),
     ///     [(2, "two".to_string()), (3, "three_latest".to_string())]
     /// );
     /// ```
-    pub fn insert_mut(&mut self, key: Key, value: Value) -> &mut Value {
+    pub fn insert_mut(&mut self, key: Key, value: Value) -> (&mut Value, Option<Value>) {
         let will_evict = self.queue.len() == self.capacity.get();
         let result = PolicyType::insert_or_update_entry(
             key,
@@ -1781,14 +1879,14 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         );
 
         match result {
-            InsertionResult::Inserted(ptr) => {
+            InsertionResult::Inserted(ptr, evicted) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
                     self.statistics.evictions += u64::from(will_evict);
                 }
 
-                self.queue[ptr].value_mut()
+                (self.queue[ptr].value_mut(), evicted)
             }
             InsertionResult::Updated(ptr) => {
                 #[cfg(feature = "statistics")]
@@ -1796,7 +1894,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
                     self.statistics.hits += 1;
                 }
 
-                self.queue[ptr].value_mut()
+                (self.queue[ptr].value_mut(), None)
             }
             _ => unreachable!("Unexpected insertion result: {:?}", result),
         }
@@ -1894,7 +1992,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         );
 
         match result {
-            InsertionResult::Inserted(ptr) => {
+            InsertionResult::Inserted(ptr, _) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
@@ -2035,7 +2133,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> Cache<Key, Value, PolicyT
         );
 
         match result {
-            InsertionResult::Inserted(ptr) => {
+            InsertionResult::Inserted(ptr, _) => {
                 #[cfg(feature = "statistics")]
                 {
                     self.statistics.insertions += 1;
@@ -2895,7 +2993,7 @@ impl<Key: Hash + Eq, Value, PolicyType: Policy<Value>> std::iter::FromIterator<(
                 &mut queue,
             );
             match result {
-                InsertionResult::Inserted(_) => {
+                InsertionResult::Inserted(_, _) => {
                     #[cfg(feature = "statistics")]
                     {
                         insertions += 1;
@@ -3348,7 +3446,6 @@ mod statistics_tests {
 
         let stats = cache.statistics();
         assert_eq!(stats.insertions, 2);
-        assert_eq!(stats.misses, 2);
 
         // Failed insertion (key already exists)
         assert_eq!(

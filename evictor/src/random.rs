@@ -6,9 +6,7 @@ use rand::seq::SliceRandom;
 use tether_map::Ptr;
 use tether_map::linked_hash_map::LinkedHashMap;
 use tether_map::linked_hash_map::RemovedEntry;
-use tether_map::linked_hash_map::{
-    self,
-};
+use tether_map::linked_hash_map::{self};
 
 use crate::EntryValue;
 use crate::InsertOrUpdateAction;
@@ -136,16 +134,18 @@ impl<T> Policy<T> for RandomPolicy {
                     }
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
-                let ptr = if make_room_on_insert {
+                let (ptr, evicted) = if make_room_on_insert {
                     let ptr = vacant_entry.insert_tail(RandomEntry::new(value)).0;
-                    Self::remove_entry(would_evict.unwrap(), metadata, queue);
+                    let evicted = Self::remove_entry(would_evict.unwrap(), metadata, queue)
+                        .1
+                        .map(|(_, entry)| entry.into_value());
                     metadata.ptrs.swap_remove(&would_evict.unwrap());
-                    ptr
+                    (ptr, evicted)
                 } else {
-                    vacant_entry.insert_tail(RandomEntry::new(value)).0
+                    (vacant_entry.insert_tail(RandomEntry::new(value)).0, None)
                 };
                 metadata.ptrs.insert(ptr);
-                InsertionResult::Inserted(ptr)
+                InsertionResult::Inserted(ptr, evicted)
             }
         }
     }

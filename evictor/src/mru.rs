@@ -3,9 +3,7 @@ use std::hash::Hash;
 use tether_map::Ptr;
 use tether_map::linked_hash_map::LinkedHashMap;
 use tether_map::linked_hash_map::RemovedEntry;
-use tether_map::linked_hash_map::{
-    self,
-};
+use tether_map::linked_hash_map::{self};
 
 use crate::EntryValue;
 use crate::InsertOrUpdateAction;
@@ -108,16 +106,17 @@ impl<T> Policy<T> for MruPolicy {
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
 
-                let ptr = if make_room_on_insert {
+                let (ptr, evicted) = if make_room_on_insert {
                     let ptr = vacant_entry.insert_unlinked(MruEntry::new(value)).0;
-                    Self::evict_entry(metadata, queue);
+                    let evicted =
+                        Self::evict_entry(metadata, queue).map(|(_, entry)| entry.into_value());
                     queue.link_as_head(ptr);
-                    ptr
+                    (ptr, evicted)
                 } else {
-                    vacant_entry.insert_head(MruEntry::new(value)).0
+                    (vacant_entry.insert_head(MruEntry::new(value)).0, None)
                 };
 
-                InsertionResult::Inserted(ptr)
+                InsertionResult::Inserted(ptr, evicted)
             }
         }
     }
@@ -248,8 +247,8 @@ mod tests {
         mru.insert("b", 2);
         mru.insert("c", 3);
 
-        assert_eq!(mru.get_or_insert_with("a", |_| 10), &1);
-        assert_eq!(mru.get_or_insert_with("d", |_| 4), &4);
+        assert_eq!(mru.get_or_insert_with("a", |_| 10), (&1, None));
+        assert_eq!(mru.get_or_insert_with("d", |_| 4), (&4, Some(1)));
         assert_eq!(mru.get(&"a"), None);
         assert_eq!(mru.get(&"c"), Some(&3));
     }
@@ -387,8 +386,9 @@ mod tests {
 
         mru.get(&1);
 
-        let value = mru.get_or_insert_with(3, |_| 30);
+        let (value, evicted) = mru.get_or_insert_with(3, |_| 30);
         assert_eq!(value, &30);
+        assert_eq!(evicted, Some(10));
 
         assert_eq!(mru.into_iter().collect::<Vec<_>>(), [(3, 30), (2, 20)]);
     }
@@ -402,8 +402,9 @@ mod tests {
         mru.insert(2, 20);
         mru.insert(3, 30);
 
-        let value = mru.get_or_insert_with(1, |_| 999);
+        let (value, evicted) = mru.get_or_insert_with(1, |_| 999);
         assert_eq!(value, &10);
+        assert!(evicted.is_none());
 
         mru.insert(4, 40);
 
@@ -677,12 +678,12 @@ mod tests {
     fn test_mru_insert_mut() {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
 
-        let val = mru.insert_mut(1, "test".to_string());
+        let (val, _) = mru.insert_mut(1, "test".to_string());
         val.push_str(" modified");
 
         assert_eq!(mru.get(&1), Some(&"test modified".to_string()));
 
-        let val = mru.insert_mut(1, "replaced".to_string());
+        let (val, _) = mru.insert_mut(1, "replaced".to_string());
         val.push_str(" again");
 
         assert_eq!(mru.get(&1), Some(&"replaced again".to_string()));
@@ -694,12 +695,12 @@ mod tests {
         let mut mru = Mru::new(NonZeroUsize::new(2).unwrap());
         mru.insert(1, "existing".to_string());
 
-        let val = mru.get_or_insert_with_mut(1, |_| "new".to_string());
+        let (val, _) = mru.get_or_insert_with_mut(1, |_| "new".to_string());
         val.push_str(" modified");
 
         assert_eq!(mru.get(&1), Some(&"existing modified".to_string()));
 
-        let val = mru.get_or_insert_with_mut(2, |_| "created".to_string());
+        let (val, _) = mru.get_or_insert_with_mut(2, |_| "created".to_string());
         val.push_str(" also modified");
 
         assert_eq!(mru.get(&2), Some(&"created also modified".to_string()));

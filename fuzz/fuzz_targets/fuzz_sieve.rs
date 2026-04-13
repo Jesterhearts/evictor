@@ -33,9 +33,10 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
             CacheOperation::Insert(k, v) => {
                 let len = cache.len();
                 let contains_key = cache.contains_key(&k);
-                let after = *cache.insert(k, v);
+                let was_full = len == cache.capacity();
+                let evicted = cache.insert(k, v);
                 assert!(
-                    contains_key || cache.len() > len || len == cache.capacity(),
+                    contains_key || cache.len() > len || was_full,
                     "Insert operation failed to increase cache size: {} < {len} {k} {v} {cache:#?}",
                     cache.len()
                 );
@@ -49,8 +50,14 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
                     "Cache does not contain key in iterator: {k} {v} {cache:#?}",
                 );
                 assert_eq!(
-                    after, v,
-                    "Insert operation failed for key: {k} {v} {cache:#?}",
+                    cache.peek(&k).copied(),
+                    Some(v),
+                    "Insert operation failed to store value for key: {k} {v} {cache:#?}",
+                );
+                assert_eq!(
+                    evicted.is_some(),
+                    !contains_key && was_full,
+                    "Eviction state mismatch for key: {k} {v} {cache:#?}",
                 );
             }
             CacheOperation::Get(k) => {
@@ -134,10 +141,11 @@ fuzz_target!(|data: (u8, Vec<CacheOperation>)| {
             }
             CacheOperation::GetOrInsertWith(k, v) => {
                 let before = cache.get(&k).copied();
-                let inserted = *cache.get_or_insert_with(k, |ik| {
+                let (inserted_ref, _evicted) = cache.get_or_insert_with(k, |ik| {
                     assert_eq!(k, *ik, "Key mismatch in get_or_insert_with: {ik} != {k}");
                     v
                 });
+                let inserted = *inserted_ref;
                 assert!(
                     (before.is_none() && inserted == v) || before == Some(inserted),
                     "GetOrInsertWith operation failed for key: {k} {v} {cache:#?}",

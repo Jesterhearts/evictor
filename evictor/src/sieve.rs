@@ -4,9 +4,7 @@ use std::hash::Hash;
 use tether_map::Ptr;
 use tether_map::linked_hash_map::LinkedHashMap;
 use tether_map::linked_hash_map::RemovedEntry;
-use tether_map::linked_hash_map::{
-    self,
-};
+use tether_map::linked_hash_map::{self};
 
 use crate::EntryValue;
 use crate::InsertOrUpdateAction;
@@ -131,18 +129,19 @@ impl<Value> Policy<Value> for SievePolicy {
                     }
                     InsertOrUpdateAction::InsertOrUpdate(value) => value,
                 };
-                let ptr = if make_room_on_insert {
+                let (ptr, evicted) = if make_room_on_insert {
                     let ptr = vacant_entry.insert_unlinked(SieveEntry::new(value)).0;
-                    Self::evict_entry(metadata, queue);
+                    let evicted =
+                        Self::evict_entry(metadata, queue).map(|(_, entry)| entry.into_value());
                     queue.link_as_head(ptr);
-                    ptr
+                    (ptr, evicted)
                 } else {
-                    vacant_entry.insert_head(SieveEntry::new(value)).0
+                    (vacant_entry.insert_head(SieveEntry::new(value)).0, None)
                 };
                 if metadata.hand.is_none() {
                     metadata.hand = Some(ptr);
                 }
-                InsertionResult::Inserted(ptr)
+                InsertionResult::Inserted(ptr, evicted)
             }
         }
     }
