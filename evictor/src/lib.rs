@@ -1,4 +1,4 @@
-#![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md"))]
+#![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 #![deny(missing_docs)]
 #![cfg_attr(all(doc, ENABLE_DOC_AUTO_CFG), feature(doc_cfg))]
 #![forbid(unsafe_code)]
