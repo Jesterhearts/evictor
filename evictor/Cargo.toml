@@ -1,6 +1,6 @@
 [package]
 name         = "evictor"
-version      = "0.7.1"
+version      = "0.7.2"
 edition      = "2024"
 rust-version = "1.88.0"
 description  = "A library for generic caching with configurable eviction policies."
@@ -9,6 +9,13 @@ repository   = "https://github.com/jesterhearts/evictor"
 license      = "MIT OR Apache-2.0"
 keywords     = ["cache", "data-structures", "eviction", "lfu", "lru"]
 categories   = ["caching", "data-structures", "memory-management"]
+include      = [
+  "../README.md",
+  "benches/**/*",
+  "build.rs",
+  "examples/**/*",
+  "src/**/*",
+]
 
 [package.metadata.docs.rs]
 all-features = true
